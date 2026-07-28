@@ -1,0 +1,2 @@
+sample_id,sample_prefix,ref_version,raw_dir,normal_id,normal_bam
+SAMPLE_001,SAMPLE_001,19,/path/to/raw/dir/sample_001,,

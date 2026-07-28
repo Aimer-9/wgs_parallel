@@ -1,0 +1,106 @@
+# Copy to ../../config.yaml or let setup.sh generate it, then set work_dir.
+work_dir: /path/to/work_dir
+
+tools:
+  java: java
+  conda: conda
+  fastqc: /path/to/fastqc
+  trimmomatic_dir: /path/to/Trimmomatic-0.39
+  bwa_mem2: /path/to/bwa-mem2
+  samtools: /path/to/samtools
+  gatk: /path/to/gatk
+  bcftools: bcftools
+  parallel: parallel
+  multiqc: multiqc
+  seqkit: seqkit
+  mosdepth: mosdepth
+  mosdepth_dir: /path/to/mosdepth
+  annovar_dir: /path/to/annovar
+
+references:
+  "19":
+    fasta: /path/to/Homo_sapiens_assembly19.fasta
+    known_indels: /path/to/known_indels_20120518.vcf
+    dbsnp: /path/to/dbsnp_138.b37.vcf.gz
+    mills: /path/to/Mills_and_1000G_gold_standard.indels.b37.vcf.gz
+    hapmap: /path/to/hapmap_3.3.b37.vcf.gz
+    omni_1000g: /path/to/1000G_omni2.5.b37.vcf.gz
+    phase1_1000g: /path/to/1000G_phase1.snps.high_confidence.b37.vcf.gz
+    germline_resource: /path/to/af-only-gnomad.raw.sites.vcf.gz
+    panel_of_normals: /path/to/Mutect2-WGS-panel-b37.vcf.gz
+  "38":
+    fasta: /path/to/Homo_sapiens_assembly38.fasta
+    known_indels: /path/to/Homo_sapiens_assembly38.known_indels.vcf.gz
+    dbsnp: /path/to/Homo_sapiens_assembly38.dbsnp138.vcf.gz
+    mills: /path/to/Mills_and_1000G_gold_standard.indels.hg38.vcf.gz
+    hapmap: /path/to/hapmap_3.3.hg38.vcf.gz
+    omni_1000g: /path/to/1000G_omni2.5.hg38.vcf.gz
+    phase1_1000g: /path/to/1000G_phase1.snps.high_confidence.hg38.vcf.gz
+    germline_resource: /path/to/af-only-gnomad.hg38.vcf.gz
+    panel_of_normals: /path/to/1000g_pon.hg38.vcf.gz
+
+parameters:
+  global:
+    max_processor_use_fraction: 0.8
+  fastqc_raw:
+    # Maximum concurrent sample pairs; R1 and R2 are scheduled separately.
+    max_jobs: 10
+    q30_threads: 20
+    extra_args: ""
+  trim:
+    max_jobs: 10
+    leading_quality: 10
+    trailing_quality: 10
+    minimum_length: 25
+    sliding_window: "4:15"
+    extra_args: ""
+  fastqc_trimmed:
+    # Maximum concurrent sample pairs; R1 and R2 are scheduled separately.
+    max_jobs: 10
+    q30_threads: 20
+    extra_args: ""
+  bwa:
+    max_jobs: 3
+    extra_args: "-v 1 -M"
+  sort:
+    # Approximate peak sort memory: max_jobs * threads_per_job * memory_per_thread.
+    max_jobs: 2
+    threads_per_job: 2
+    memory_per_thread: 1G
+    extra_args: ""
+  index:
+    max_jobs: 10
+  mosdepth:
+    max_jobs: 10
+    threads: 4
+    extra_args: "-n"
+  mark_duplicates:
+    max_jobs: 10
+    extra_args: ""
+  bqsr:
+    max_jobs: 10
+    minimum_output_bytes: 10485760
+    extra_args: ""
+  haplotype_caller:
+    max_jobs: 10
+    native_threads: 1
+    keep_scatter_gvcfs: "no"
+    extra_args: ""
+  genotype_gvcfs:
+    max_jobs: 10
+    extra_args: ""
+  vqsr:
+    max_jobs: 10
+    snp_truth_sensitivity: 99.5
+    indel_truth_sensitivity: 99.0
+    extra_args: ""
+  annovar:
+    max_jobs: 10
+    update_clinvar: "no"
+    protocol: "refGene,cytoBand,{clinvar},avsnp150,exac03"
+    operation: "g,r,f,f,f"
+    extra_args: ""
+  mutect2:
+    max_jobs: 10
+    extra_args: ""
+    filter_extra_args: ""
