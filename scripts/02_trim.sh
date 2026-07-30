@@ -1,4 +1,17 @@
 #!/bin/bash
+# Stage 02: paired-end adapter and quality trimming with Trimmomatic.
+#
+# Positional arguments:
+#   1 work_dir; 2 sample_manifest_tsv; 3 Trimmomatic installation directory;
+#   4 CPU fraction; 5 maximum concurrent samples; 6 LEADING quality;
+#   7 TRAILING quality; 8 MINLEN; 9 SLIDINGWINDOW; 10 extra arguments;
+#  11 Java executable.
+#
+# For each sample, raw R1/R2 files are resolved from its manifest raw_dir and
+# four gzip files are created in output/02_trim: paired and unpaired output for
+# each mate. Downstream alignment consumes only the paired files. Trimmomatic
+# threads are divided across concurrent sample jobs. On interrupted recovery,
+# all four files for that sample are removed before the task is retried.
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 source "${REPO_DIR}/scripts/00_util.sh"
 

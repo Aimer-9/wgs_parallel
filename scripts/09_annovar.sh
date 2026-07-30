@@ -1,4 +1,22 @@
 #!/bin/bash
+# Stages 09 and 11: ANNOVAR conversion, annotation, and summary statistics.
+# The same script annotates germline VQSR output and somatic Mutect2 output;
+# wgs.sh supplies a different VCF directory, suffix, sample list, and output dir.
+#
+# Positional arguments:
+#   1 work_dir; 2 reference build; 3 ANNOVAR installation;
+#   4 input VCF directory; 5 per-sample VCF suffix; 6 CPU fraction;
+#   7 update ClinVar (yes/no); 8 maximum concurrent samples;
+#   9 sample-list file; 10 protocol template containing {clinvar};
+#  11 ANNOVAR operation list; 12 extra table_annovar arguments;
+#  13 annotation output directory; 14 Conda executable.
+#
+# Required ANNOVAR databases are checked before parallel sample work. ClinVar is
+# resolved dynamically to the newest local version, optionally refreshed using
+# update_annovar_db. Per sample, VCF is converted to avinput and table_annovar is
+# run with calculated threads. Interrupted conversion/annotation files are
+# cleaned through checkpoints. Final tables include functional, exonic, and
+# ClinVar-focused summaries.
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 source "${REPO_DIR}/scripts/00_util.sh"
 
@@ -11,10 +29,35 @@ MAX_PROCESSOR_USE_PERCENT=$6
 update_clinvar=$7    # "yes" or "no"
 MAX_ANNOVAR_JOBS=${8:-10}
 sample_list_file=${9:-${work_dir}/sample_list.txt}
-ANNOTATION_PROTOCOL_TEMPLATE=${10:-refGene,cytoBand,{clinvar},avsnp150,exac03}
+ANNOTATION_PROTOCOL_TEMPLATE=${10:-refGene,cytoBand,avsnp150,exac03,{clinvar}}
 OPERATION_TYPE=${11:-g,r,f,f,f}
 ANNOVAR_EXTRA_ARGS=${12:-}
 annovar_dir=${13:-${vcf_prefix}/annovar}
+conda_bin=${14:-conda}
+
+# Older generated configs could append one extra closing brace while passing
+# the placeholder through positional arguments. Normalize only that known
+# typo; all other brace patterns remain hard errors below.
+ANNOTATION_PROTOCOL_TEMPLATE=${ANNOTATION_PROTOCOL_TEMPLATE//\{clinvar\}\}/\{clinvar\}}
+
+# ANNOVAR requires one operation code for every protocol entry. Validate again
+# here so direct script calls receive the same protection as config.py users.
+IFS=',' read -r -a protocol_items <<< "$ANNOTATION_PROTOCOL_TEMPLATE"
+IFS=',' read -r -a operation_items <<< "$OPERATION_TYPE"
+for protocol_item in "${protocol_items[@]}"; do
+  if { [[ "$protocol_item" == *'{'* ]] || [[ "$protocol_item" == *'}'* ]]; } \
+    && [ "$protocol_item" != '{clinvar}' ]; then
+    echo "Error: malformed ANNOVAR protocol placeholder: $protocol_item" >&2
+    echo "Only the exact token {clinvar} may contain braces." >&2
+    exit 1
+  fi
+done
+if [ "${#protocol_items[@]}" -ne "${#operation_items[@]}" ]; then
+  echo "Error: ANNOVAR protocol/operation count mismatch: ${#protocol_items[@]} protocols but ${#operation_items[@]} operations" >&2
+  echo "  protocol : $ANNOTATION_PROTOCOL_TEMPLATE" >&2
+  echo "  operation: $OPERATION_TYPE" >&2
+  exit 1
+fi
 
 if [ ! -s "$sample_list_file" ]; then
   echo "No samples available for annotation: $sample_list_file"
@@ -26,9 +69,11 @@ nproc=$(nproc)
 threads_per_sample=$(calculate_threads "$MAX_PROCESSOR_USE_PERCENT" "$MAX_ANNOVAR_JOBS")
 
 humandb="${annovar_path}/humandb"
+if [ ! -d "$humandb" ]; then mkdir -p "$humandb"; fi
 if [ ! -d "$annovar_dir" ]; then mkdir -p "$annovar_dir"; fi
 
-# ── Database check + auto-download ───────────────────────────────────────────
+# Ensure stable protocol resources exist; missing databases are downloaded into
+# ANNOVAR humandb using the selected hg19/hg38 build prefix.
 ensure_db() {
   local db_name=$1
   local db_file="${humandb}/hg${hsa_version}_${db_name}.txt"
@@ -45,43 +90,47 @@ ensure_db cytoBand
 ensure_db exac03
 ensure_db avsnp150
 
-# ── ClinVar version resolution ────────────────────────────────────────────────
-# Map hsa_version integer to the genome build string used by update_annovar_db
+# Map the numeric pipeline build to update_annovar_db's GRCh naming convention.
 if [ "${hsa_version}" -eq 19 ]; then
   clinvar_build=GRCh37
 elif [ "${hsa_version}" -eq 38 ]; then
   clinvar_build=GRCh38
 fi
 
-update_annovar_db_dir="${annovar_path}/update_annovar_db"
-
-# Clone update_annovar_db repo if not present
-if [ ! -f "${update_annovar_db_dir}/update_resources.py" ]; then
-  git clone https://github.com/mobidic/update_annovar_db.git "$update_annovar_db_dir"
-  conda env create -f "${update_annovar_db_dir}/environment.yml"
-fi
+update_resources_py="${REPO_DIR}/scripts/update_resources.py"
+avinput_converter_py="${REPO_DIR}/scripts/avinput2annovardb.py"
 
 if [ "$update_clinvar" = "yes" ]; then
+  if [ ! -f "$update_resources_py" ] || [ ! -f "$avinput_converter_py" ]; then
+    echo "Error: integrated ClinVar updater scripts are missing under ${REPO_DIR}/scripts" >&2
+    exit 1
+  fi
   date +"%Y-%m-%d %H:%M:%S" && echo "Updating ClinVar database (${clinvar_build})..."
-  source activate update_annovar_db
-  python "${update_annovar_db_dir}/update_resources.py" \
+  "$conda_bin" run --no-capture-output -n wgs_parallel \
+    python "$update_resources_py" \
     -d clinvar \
     -hp "$humandb" \
     -a  "$annovar_path" \
     -g  "$clinvar_build"
-  conda deactivate
-
-  # Copy the downloaded file into humandb/ with the hgXX_ prefix
-  latest_clinvar_txt=$(find "${update_annovar_db_dir}/clinvar/${clinvar_build}" \
-    -maxdepth 1 -name 'clinvar_*.txt' -printf '%T@ %p\n' \
-    | sort -n | tail -1 | awk '{print $2}')
-  cp "$latest_clinvar_txt" "${humandb}/hg${hsa_version}_$(basename "$latest_clinvar_txt")"
 fi
 
-# Select the most recently downloaded local ClinVar file
-latest_clinvar_file=$(find "$humandb" -maxdepth 1 \
-  -name "hg${hsa_version}_clinvar_*.txt" -printf '%T@ %p\n' \
-  | sort -n | tail -1 | awk '{print $2}')
+# Select the most recently installed ClinVar file. Restrict the release suffix
+# to eight digits so stale files such as hg19_clinvar_20250120}.txt cannot be
+# expanded into an invalid ANNOVAR protocol name.
+latest_clinvar_file=""
+latest_clinvar_mtime=0
+while IFS= read -r candidate; do
+  candidate_name=$(basename "$candidate")
+  candidate_version=${candidate_name#hg${hsa_version}_clinvar_}
+  candidate_version=${candidate_version%.txt}
+  if [[ "$candidate_version" =~ ^[0-9]{8}$ ]]; then
+    candidate_mtime=$(stat -c '%Y' "$candidate" 2>/dev/null || echo 0)
+    if [ "$candidate_mtime" -ge "$latest_clinvar_mtime" ]; then
+      latest_clinvar_file="$candidate"
+      latest_clinvar_mtime=$candidate_mtime
+    fi
+  fi
+done < <(find "$humandb" -maxdepth 1 -type f -name "hg${hsa_version}_clinvar_*.txt" -print)
 
 if [ -z "$latest_clinvar_file" ]; then
   echo "Error: no ClinVar database found in ${humandb} for hg${hsa_version}"
@@ -92,7 +141,7 @@ fi
 clinvar_version=$(basename -s .txt "$latest_clinvar_file" | sed "s/hg${hsa_version}_//")
 date +"%Y-%m-%d %H:%M:%S" && echo "Using ClinVar version: ${clinvar_version}"
 
-# ── VCF → ANNOVAR input conversion ───────────────────────────────────────────
+# Convert each available PASS-filtered VCF to ANNOVAR's avinput representation.
 convert_to_avinput() {
   local sample_id=$1
   local vcf="${vcf_prefix}/${sample_id}${vcf_suffix}"
@@ -122,9 +171,13 @@ date +"%Y-%m-%d %H:%M:%S" && echo -e "\e[37;42mannovar convert: start\e[m"
 parallel_run_sample_list "$sample_list_file" "$MAX_ANNOVAR_JOBS" convert_to_avinput annovar_convert || exit 1
 date +"%Y-%m-%d %H:%M:%S" && echo -e "\e[37;42mannovar convert: all done\e[m"
 
-# ── table_annovar annotation ──────────────────────────────────────────────────
-# Protocol: refGene (gene), cytoBand (region), ClinVar + avsnp150 + exac03 (filter)
+# Replace {clinvar} only after the latest installed database version is known.
+# Protocol entries and operation types stay aligned by their comma positions.
 ANNOTATION_PROTOCOL=${ANNOTATION_PROTOCOL_TEMPLATE//\{clinvar\}/$clinvar_version}
+if [[ "$ANNOTATION_PROTOCOL" == *'{'* ]] || [[ "$ANNOTATION_PROTOCOL" == *'}'* ]]; then
+  echo "Error: unresolved brace in ANNOVAR protocol after ClinVar expansion: $ANNOTATION_PROTOCOL" >&2
+  exit 1
+fi
 
 run_annotation() {
   local sample_id=$1
@@ -166,7 +219,8 @@ date +"%Y-%m-%d %H:%M:%S" && echo -e "\e[37;42mannovar annotate: start\e[m"
 parallel_run_sample_list "$sample_list_file" "$MAX_ANNOVAR_JOBS" run_annotation annovar_annotate || exit 1
 date +"%Y-%m-%d %H:%M:%S" && echo -e "\e[37;42mannovar annotate: all done\e[m"
 
-# ── Per-sample statistics ─────────────────────────────────────────────────────
+# Generate lightweight summaries from multianno columns after every parallel
+# annotation is complete. These files are independently resumable.
 date +"%Y-%m-%d %H:%M:%S" && echo -e "\e[37;42mannovar stats: start\e[m"
 while IFS= read -r sample_id; do
   local_multianno="${annovar_dir}/${sample_id}.hg${hsa_version}_multianno.txt"
@@ -178,7 +232,7 @@ while IFS= read -r sample_id; do
   alltype_stats="${annovar_dir}/${sample_id}.hg${hsa_version}_multianno.alltype_stats.txt"
   clinvar_out="${annovar_dir}/${sample_id}.hg${hsa_version}_multianno.clinvar.txt"
 
-  # Exonic variant type counts (col 9 = ExonicFunc.refGene)
+  # Count coding consequences from ExonicFunc.refGene (multianno column 9).
   if [ ! -s "$exonic_stats" ]; then
     awk -F'\t' '
       BEGIN { OFS="\t"; print "ExonicFunc.refGene", "Count" }
@@ -189,7 +243,7 @@ while IFS= read -r sample_id; do
     ' "$local_multianno" > "$exonic_stats"
   fi
 
-  # All functional region counts (col 6 = Func.refGene)
+  # Count broader genomic regions from Func.refGene (multianno column 6).
   if [ ! -s "$alltype_stats" ]; then
     awk -F'\t' '
       BEGIN { OFS="\t"; print "Func.refGene", "Count" }
@@ -200,9 +254,9 @@ while IFS= read -r sample_id; do
     ' "$local_multianno" > "$alltype_stats"
   fi
 
-  # ClinVar-annotated variants only (col 12 = CLNALLELEID, non-NA)
+  # Retain the header and rows with a non-NA CLNALLELEID (column 21).
   if [ ! -s "$clinvar_out" ]; then
-    awk -F'\t' 'NR==1 || $12 != "NA"' "$local_multianno" > "$clinvar_out"
+    awk -F'\t' 'NR==1 || $21 != "NA"' "$local_multianno" > "$clinvar_out"
   fi
 
   date +"%Y-%m-%d %H:%M:%S" && echo -e "\e[37;42mannovar stats: ${sample_id} done\e[m"

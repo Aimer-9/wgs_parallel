@@ -1,5 +1,25 @@
 #!/bin/bash
 
+# Top-level WGS pipeline orchestrator.
+#
+# Commands:
+#   qc   Validate inputs, run Stages 01-03, then stop for QC review.
+#   run  Require Stage 02 paired FASTQs, then run Stages 04-11.
+#   all  Run QC and variant analysis in one invocation.
+#   stop Terminate the recorded process tree for this repository.
+#
+# config.py converts config.yaml and sample.csv into exported shell variables
+# and a normalized TSV manifest. Numbered scripts own their stage outputs below
+# work_dir/output. stdout/stderr and GNU Parallel job logs go below output/logs.
+# A repository-level PID lock prevents overlapping top-level runs, while durable
+# per-task checkpoints let a restart remove interrupted outputs and retain work
+# that reached a verified completion condition.
+#
+# Typical usage:
+#   bash wgs.sh qc  sample.csv config.yaml
+#   bash wgs.sh run sample.csv config.yaml
+#   bash wgs.sh all sample.csv config.yaml
+
 REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
 SCRIPTS_DIR="${REPO_DIR}/scripts"
 
@@ -19,6 +39,7 @@ Commands:
 EOF
 }
 
+# Convert optional CLI paths into environment overrides consumed by 00_util.sh.
 set_input_paths() {
   if [ $# -gt 2 ]; then
     usage
@@ -38,6 +59,7 @@ conda_env_exists() {
   "${conda_bin:-conda}" env list 2>/dev/null | awk '{print $1}' | grep -qx "$env_name"
 }
 
+# Test a command inside a named Conda environment, matching runtime invocation.
 conda_env_executable_exists() {
   local env_name=$1
   local executable=$2
@@ -45,6 +67,7 @@ conda_env_executable_exists() {
     bash -c 'command -v "$1" >/dev/null 2>&1' _ "$executable" >/dev/null 2>&1
 }
 
+# Support both command names resolved through PATH and explicit executable paths.
 executable_exists() {
   local value=$1
   if [[ "$value" == */* ]]; then
@@ -54,6 +77,7 @@ executable_exists() {
   fi
 }
 
+# Validate only dependencies needed by raw QC, trimming, MultiQC, and SeqKit.
 validate_qc_config() {
   local errors=()
 
@@ -80,11 +104,11 @@ validate_qc_config() {
     fi
   done
   if [ -n "${conda_bin:-}" ] && executable_exists "$conda_bin"; then
-    if ! conda_env_executable_exists multiqc "${multiqc:-multiqc}"; then
-      errors+=("  [conda] '${multiqc:-multiqc}' not found in environment: multiqc")
+    if ! conda_env_executable_exists wgs_parallel "${multiqc:-multiqc}"; then
+      errors+=("  [conda] '${multiqc:-multiqc}' not found in environment: wgs_parallel")
     fi
-    if ! conda_env_executable_exists seqkit "${seqkit:-seqkit}"; then
-      errors+=("  [conda] '${seqkit:-seqkit}' not found in environment: seqkit")
+    if ! conda_env_executable_exists wgs_parallel "${seqkit:-seqkit}"; then
+      errors+=("  [conda] '${seqkit:-seqkit}' not found in environment: wgs_parallel")
     fi
   fi
 
@@ -97,6 +121,8 @@ validate_qc_config() {
   fi
 }
 
+# Validate alignment/calling tools and build-specific reference resources before
+# starting long-running variant stages.
 validate_run_config() {
   local errors=()
 
@@ -145,12 +171,14 @@ validate_run_config() {
     fi
   done
   if [ -n "${conda_bin:-}" ] && executable_exists "$conda_bin"; then
-    if ! conda_env_executable_exists mosdepth "${mosdepth:-mosdepth}"; then
-      errors+=("  [conda] '${mosdepth:-mosdepth}' not found in environment: mosdepth")
+    if ! conda_env_executable_exists wgs_parallel "${mosdepth:-mosdepth}"; then
+      errors+=("  [conda] '${mosdepth:-mosdepth}' not found in environment: wgs_parallel")
     fi
   fi
-  if [ "${update_clinvar:-no}" = "yes" ] && ! command -v conda >/dev/null 2>&1; then
-    errors+=("  [conda] conda is required when update_clinvar=yes")
+  if [ "${update_clinvar:-no}" = "yes" ] && [ -n "${conda_bin:-}" ] && executable_exists "$conda_bin"; then
+    if ! conda_env_executable_exists wgs_parallel python; then
+      errors+=("  [conda] python not found in environment: wgs_parallel")
+    fi
   fi
 
   for ref_var in ref_fa known_indels dbsnp Mills hapmap file_1000G_omni file_1000G_phase1; do
@@ -239,7 +267,7 @@ run_variant_steps() {
     "${work_dir}/output/08_VQSR" \
     ".indel.SNP.recalibrated.PASS.vcf" \
     "$MAX_PROCESSOR_USE_PERCENT" "$update_clinvar" "$MAX_ANNOVAR_JOBS" "${work_dir}/sample_list.txt" "$ANNOVAR_PROTOCOL" "$ANNOVAR_OPERATION" "$ANNOVAR_EXTRA_ARGS" \
-    "${work_dir}/output/09_annovar" || return 1
+    "${work_dir}/output/09_annovar" "$conda_bin" || return 1
 
   date +"%Y-%m-%d %H:%M:%S" && echo -e "\e[37;42mWGS germline pipeline: all done\e[m"
 
@@ -254,7 +282,7 @@ run_variant_steps() {
       "${work_dir}/output/10_Mutect2" \
       ".mutect2.filtered.PASS.vcf" \
       "$MAX_PROCESSOR_USE_PERCENT" "$update_clinvar" "$MAX_ANNOVAR_JOBS" "${work_dir}/output/10_Mutect2/success_samples.txt" "$ANNOVAR_PROTOCOL" "$ANNOVAR_OPERATION" "$ANNOVAR_EXTRA_ARGS" \
-      "${work_dir}/output/11_annovar_somatic" || return 1
+      "${work_dir}/output/11_annovar_somatic" "$conda_bin" || return 1
     date +"%Y-%m-%d %H:%M:%S" && echo -e "\e[37;42mWGS somatic pipeline: all done\e[m"
     [ "$mutect_status" -eq 0 ] || return "$mutect_status"
   else

@@ -1,4 +1,18 @@
 #!/bin/bash
+# Stage 07: chromosome-scattered GATK HaplotypeCaller in GVCF mode.
+#
+# Positional arguments:
+#   1 work_dir; 2 reference build; 3 GATK; 4 reference FASTA;
+#   5 maximum concurrent chromosome tasks; 6 primary_contigs.tsv;
+#   7 native PairHMM threads/task; 8 keep scatter GVCFs (yes/no);
+#   9 additional HaplotypeCaller arguments.
+#
+# Each incomplete sample is expanded into exactly 25 tasks: chromosomes 1-22,
+# X, Y, and mitochondrial DNA using the reference's actual contig spelling.
+# Shards are written beneath output/07_HaplotypeCaller/scatter/<sample>, then
+# gathered in deterministic contig order into <sample>.g.vcf.gz. Samples with a
+# complete indexed final GVCF bypass scatter on restart. Interrupted checkpoints
+# remove only the affected shard or final gather output before retrying.
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 source "${REPO_DIR}/scripts/00_util.sh"
 
@@ -19,6 +33,8 @@ task_file="${scatter_root}/tasks.tsv"
 mkdir -p "$scatter_root"
 : > "$task_file"
 
+# Do not recreate disposable shards when the final indexed GVCF already proves
+# that a prior scatter/gather completed successfully.
 while IFS= read -r sample_id; do
   [ -z "$sample_id" ] && continue
   final_gvcf="${haplotype_dir}/${sample_id}.g.vcf.gz"
@@ -49,6 +65,7 @@ run_haplotype_shard() {
     echo "HaplotypeCaller: ${sample_id} ${contig} exists"
     return 0
   fi
+  # A complete shard without an index can be repaired without recalling it.
   if [ -s "$gvcf" ]; then
     "$gatk" IndexFeatureFile -I "$gvcf" || return 1
     [ -s "${gvcf}.tbi" ] && return 0
@@ -86,6 +103,8 @@ gather_haplotype_sample() {
     echo "HaplotypeCaller gather: ${sample_id} exists"
     return 0
   fi
+  # GatherVcfs receives shards in primary_contigs.tsv order, not filesystem or
+  # lexical order, so chr10 cannot precede chr2 accidentally.
   while IFS=$'\t' read -r order logical contig length; do
     shard="${sample_dir}/${order}.${logical}.g.vcf.gz"
     if [ ! -s "$shard" ] || [ ! -s "${shard}.tbi" ]; then
@@ -100,6 +119,8 @@ gather_haplotype_sample() {
   if [ ! -s "${final_gvcf}.tbi" ]; then
     "$gatk" IndexFeatureFile -I "$final_gvcf" || return 1
   fi
+  # Shards are restart artifacts after a successful gather and may be removed
+  # to save disk unless the user explicitly requests retention.
   if [ "$HC_KEEP_SCATTER" = "no" ]; then
     rm -f "${sample_dir}"/*.g.vcf.gz "${sample_dir}"/*.g.vcf.gz.tbi
     rmdir "$sample_dir" 2>/dev/null || true

@@ -1,4 +1,19 @@
 #!/bin/bash
+# Stage 10: matched tumor-normal somatic calling with GATK Mutect2.
+#
+# Positional arguments:
+#   1 work_dir; 2 normalized sample manifest; 3 GATK; 4 samtools;
+#   5 bcftools; 6 reference build; 7 reference FASTA;
+#   8 germline population resource; 9 panel of normals;
+#  10 primary_contigs.tsv; 11 maximum concurrent pairs;
+#  12 Mutect2 extra args; 13 FilterMutectCalls extra args.
+#
+# Tumor BAMs are Stage 06 BQSR outputs. A manifest row is eligible only when it
+# has normal_bam, an index, a dictionary compatible with all 25 primary contigs,
+# and one unambiguous normal sample name matching normal_id when supplied.
+# Eligible pairs are recorded in pairs.tsv; validation skips and calling failures
+# are recorded separately. Mutect2 is restricted to 1-22, X, Y, and MT, followed
+# by FilterMutectCalls and bcftools PASS filtering in output/10_Mutect2.
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 source "${REPO_DIR}/scripts/00_util.sh"
 
@@ -27,11 +42,14 @@ printf 'sample_id\tnormal_bam\treason\n' > "$skipped_pairs"
 : > "$pair_manifest"
 : > "$success_samples"
 
+# Record non-runnable rows without stopping valid tumor-normal pairs.
 skip_pair() {
   printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "$skipped_pairs"
   echo "Mutect2 skip: $1 - $3"
 }
 
+# Confirm that every selected reference contig exists in the normal BAM header
+# with the same length. This catches hg19/hg38 and chr/non-chr mismatches early.
 normal_has_primary_dictionary() {
   local normal_bam=$1
   local header
@@ -53,6 +71,7 @@ normal_has_primary_dictionary() {
   done < "$primary_contigs_tsv"
 }
 
+# Validate normal files and sample identities before launching any caller jobs.
 while IFS= read -r manifest_row; do
   normalized_row=${manifest_row//$'\t'/$'\x1f'}
   IFS=$'\x1f' read -r sample_id sample_prefix sample_ref raw_dir normal_id normal_bam <<< "$normalized_row"
@@ -107,6 +126,7 @@ run_mutect2_pair() {
   local pass_vcf="${mutect2_dir}/${sample_id}.mutect2.filtered.PASS.vcf"
   local order logical contig length
   local -a intervals=() mutect_extra=() filter_extra=()
+  # Build explicit intervals so alternate/random contigs never enter calling.
   while IFS=$'\t' read -r order logical contig length; do
     intervals+=("-L" "$contig")
   done < "$primary_contigs_tsv"
@@ -158,6 +178,8 @@ else
   echo "Mutect2: no valid tumor-normal pairs"
 fi
 
+# Reconcile expected pair outputs after Parallel finishes. Only successful PASS
+# VCF samples are passed to Stage 11 somatic ANNOVAR annotation.
 printf 'sample_id\tnormal_bam\treason\n' > "$failed_pairs"
 while IFS=$'\t' read -r sample_id normal_bam normal_sample; do
   [ -z "$sample_id" ] && continue

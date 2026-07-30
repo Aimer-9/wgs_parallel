@@ -1,0 +1,13 @@
+name: wgs_parallel
+channels:
+  - conda-forge
+  - bioconda
+  - defaults
+dependencies:
+  - python=3.12
+  - requests
+  - urllib3
+  - certifi
+  - multiqc
+  - seqkit
+  - mosdepth

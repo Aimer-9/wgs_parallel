@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""Recursively symlink FASTQs from a result tree into one raw_link directory."""
+"""Flatten a sequencing-company result tree into a directory of FASTQ links.
+
+The source tree is searched recursively. If one or more directories named
+``Rawdata`` (case-insensitive) exist, only those subtrees are used; this avoids
+linking duplicate ``Cleandata`` files. When no Rawdata directory exists, the
+entire result tree is searched. Files are never copied or decompressed, and an
+existing destination is never overwritten unless it is already the exact link.
+"""
 
 from __future__ import annotations
 
@@ -13,11 +20,13 @@ FASTQ_SUFFIXES = (".fq", ".fastq", ".fq.gz", ".fastq.gz")
 
 
 def is_fastq(path: Path) -> bool:
+    """Return whether a filename has a supported FASTQ suffix."""
     lower = path.name.lower()
     return lower.endswith(FASTQ_SUFFIXES)
 
 
 def main() -> int:
+    """Parse paths, select source FASTQs, and create collision-safe symlinks."""
     parser = argparse.ArgumentParser(
         description="Find FASTQ files recursively under a result directory and symlink them into one raw_link directory."
     )
@@ -33,6 +42,7 @@ def main() -> int:
     if not source.is_dir():
         parser.error(f"result directory not found: {source}")
 
+    # Prefer provider-delivered Rawdata over Cleandata when both trees exist.
     rawdata_roots = sorted(
         path for path in source.rglob("*")
         if path.is_dir() and path.name.lower() == "rawdata"
@@ -49,6 +59,8 @@ def main() -> int:
     linked = 0
     if not args.dry_run:
         raw_link.mkdir(parents=True, exist_ok=True)
+    # Basename flattening makes raw_link easy for manifests to reference, but
+    # duplicate basenames from separate provider directories are rejected.
     for source_file in files:
         destination = raw_link / source_file.name
         print(f"{destination} -> {source_file}")

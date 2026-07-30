@@ -97,7 +97,9 @@ parameters:
   annovar:
     max_jobs: 10
     update_clinvar: "no"
-    protocol: "refGene,cytoBand,{clinvar},avsnp150,exac03"
+    # protocol and operation must contain the same number of comma-separated items.
+    # Use g for gene, r for region, and f for filter annotation databases.
+    protocol: "refGene,cytoBand,avsnp150,exac03,{clinvar}"
     operation: "g,r,f,f,f"
     extra_args: ""
   mutect2:

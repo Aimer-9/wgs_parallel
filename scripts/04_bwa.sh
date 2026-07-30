@@ -1,4 +1,19 @@
 #!/bin/bash
+# Stage 04: reference indexing, alignment, coordinate sorting, BAM indexing,
+# and mosdepth coverage reporting.
+#
+# Positional arguments:
+#   1 work_dir; 2 reference build; 3 reference FASTA; 4 BWA-MEM2 executable;
+#   5 samtools; 6 directory containing mosdepth plot-dist.py; 7 CPU fraction;
+#   8 BWA jobs; 9 sort jobs; 10 index jobs; 11 mosdepth jobs;
+#  12 BWA extra args; 13 sort memory per thread; 14 sort extra args;
+#  15 mosdepth command; 16 mosdepth threads; 17 mosdepth extra args;
+#  18 Conda executable; 19 fixed samtools-sort threads per job.
+#
+# All sample outputs live in output/04_bwa. Each substage has its own Parallel
+# checkpoint and cleanup handler. In particular, samtools sort peak buffer use
+# is approximately jobs * threads/job * memory/thread, so jobs and threads are
+# capped independently. Mosdepth runs inside the named Conda environment.
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 source "${REPO_DIR}/scripts/00_util.sh"
 
@@ -43,14 +58,15 @@ sort_jobs_by_cpu=$(( $(calculate_cpu_budget "$MAX_PROCESSOR_USE_PERCENT") / thre
 bwa_dir="${work_dir}/output/04_bwa"
 if [ ! -d "$bwa_dir" ]; then mkdir -p "$bwa_dir"; fi
 
-# Build BWA-MEM2 index if missing (not included in GATK bundle)
+# Build the BWA-MEM2-specific index beside the FASTA if it is not present in
+# the reference bundle. All sample alignments reuse this shared index.
 if [ ! -s "${ref_fa}.bwt.2bit.64" ]; then
   date +"%Y-%m-%d %H:%M:%S" && echo -e "\e[37;42mbwa index: building\e[m"
   "$bwamem" index "$ref_fa"
   date +"%Y-%m-%d %H:%M:%S" && echo -e "\e[37;42mbwa index: done\e[m"
 fi
 
-# ── Align ────────────────────────────────────────────────────────────────────
+# Align trimmed pairs and add a sample-specific read group required by GATK.
 run_bwa() {
   local sample_id=$1
   local trim_1="${work_dir}/output/02_trim/${sample_id}_1_paired.fq.gz"
@@ -84,7 +100,8 @@ date +"%Y-%m-%d %H:%M:%S" && echo -e "\e[37;42mbwa: start\e[m"
 parallel_run_sample_list "${work_dir}/sample_list.txt" "$MAX_BWA_JOBS" run_bwa bwa || exit 1
 date +"%Y-%m-%d %H:%M:%S" && echo -e "\e[37;42mbwa: all done\e[m"
 
-# ── Sort ─────────────────────────────────────────────────────────────────────
+# Coordinate-sort each unsorted BAM. SORT_MEMORY_PER_THREAD applies to every
+# thread, which is why threads_sort is explicitly capped above.
 run_sort() {
   local sample_id=$1
   local in_bam="${bwa_dir}/${sample_id}.bam"
@@ -115,7 +132,7 @@ echo "Sort resources: ${MAX_SORT_JOBS} parallel jobs, ${threads_sort} threads/jo
 parallel_run_sample_list "${work_dir}/sample_list.txt" "$MAX_SORT_JOBS" run_sort sort || exit 1
 date +"%Y-%m-%d %H:%M:%S" && echo -e "\e[37;42msort: all done\e[m"
 
-# ── Index ────────────────────────────────────────────────────────────────────
+# Build random-access BAI indexes required by GATK and mosdepth.
 run_index() {
   local sample_id=$1
   local sorted_bam="${bwa_dir}/${sample_id}.sorted.bam"
@@ -140,7 +157,7 @@ date +"%Y-%m-%d %H:%M:%S" && echo -e "\e[37;42mindex: start\e[m"
 parallel_run_sample_list "${work_dir}/sample_list.txt" "$MAX_INDEX_JOBS" run_index index || exit 1
 date +"%Y-%m-%d %H:%M:%S" && echo -e "\e[37;42mindex: all done\e[m"
 
-# ── Mosdepth coverage ────────────────────────────────────────────────────────
+# Calculate genome-wide depth distributions and summary statistics per sample.
 run_mosdepth() {
   local sample_id=$1
   local sorted_bam="${bwa_dir}/${sample_id}.sorted.bam"
@@ -157,7 +174,7 @@ run_mosdepth() {
 
   date +"%Y-%m-%d %H:%M:%S" && echo -e "\e[37;42mmosdepth: ${sample_id} processing\e[m"
   # mosdepth gains little above 4 threads
-  "$conda_bin" run --no-capture-output -n mosdepth "$mosdepth" -t "$MOSDEPTH_THREADS" "${extra_args[@]}" "$out_prefix" "$sorted_bam"
+  "$conda_bin" run --no-capture-output -n wgs_parallel "$mosdepth" -t "$MOSDEPTH_THREADS" "${extra_args[@]}" "$out_prefix" "$sorted_bam"
   date +"%Y-%m-%d %H:%M:%S" && echo -e "\e[37;42mmosdepth: ${sample_id} done\e[m"
 }
 
@@ -172,7 +189,7 @@ date +"%Y-%m-%d %H:%M:%S" && echo -e "\e[37;42mmosdepth: start\e[m"
 parallel_run_sample_list "${work_dir}/sample_list.txt" "$MAX_MOSDEPTH_JOBS" run_mosdepth mosdepth || exit 1
 date +"%Y-%m-%d %H:%M:%S" && echo -e "\e[37;42mmosdepth: all done\e[m"
 
-# Coverage comparison HTML across all samples
+# Render a cross-sample coverage plot once every per-sample mosdepth task ends.
 if [ ! -s "${bwa_dir}/compare.coverage_analysis.html" ]; then
   python3 "${mosdepth_path}/scripts/plot-dist.py" \
     -o "${bwa_dir}/compare.coverage_analysis.html" \
@@ -180,7 +197,8 @@ if [ ! -s "${bwa_dir}/compare.coverage_analysis.html" ]; then
     > "${bwa_dir}/compare.coverage_analysis.txt"
 fi
 
-# ── Coverage summary table (10x / 20x / 30x per sample) ─────────────────────
+# Extract mean depth and fractions at or above 10x, 20x, and 30x from mosdepth
+# tables into one compact comparison file.
 output_stat="${bwa_dir}/coverage_stat.txt"
 if [ -s "$output_stat" ]; then
   echo -e "\e[37;42mcoverage stat: exists\e[m"

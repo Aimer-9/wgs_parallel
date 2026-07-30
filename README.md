@@ -135,3 +135,10 @@ parameters:
     threads_per_job: 2
     memory_per_thread: 1G
 ```
+
+When `parameters.annovar.update_clinvar` is `yes`, Stage 09 runs the integrated
+`scripts/update_resources.py` and `scripts/avinput2annovardb.py` in the
+`update_annovar_db` Conda environment. Downloaded VCF/avinput files are cached
+under `scripts/clinvar/<build>/`; the converted database and its ANNOVAR index
+are installed directly under `<annovar_dir>/humandb/` with an `hg19_` or `hg38_`
+prefix.

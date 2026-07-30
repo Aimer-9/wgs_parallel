@@ -1,4 +1,17 @@
 #!/bin/bash
+# Stage 05: mark PCR/optical duplicate reads and index the resulting BAM.
+#
+# Positional arguments:
+#   1 work_dir; 2 reference build; 3 GATK executable; 4 samtools;
+#   5 CPU fraction; 6 maximum concurrent samples; 7 MarkDuplicates extra args.
+#
+# Input:  output/04_bwa/<sample>.sorted.bam
+# Output: output/05_markduplicated/<sample>.sorted.markdup.bam, its BAI, and a
+#         GATK duplicate metrics table.
+#
+# MarkDuplicates itself is run once per sample; calculated threads are used for
+# BAM indexing. A checkpoint cleanup removes BAM, index, and metrics together so
+# a killed GATK write cannot be mistaken for a completed sample on restart.
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 source "${REPO_DIR}/scripts/00_util.sh"
 
@@ -20,7 +33,7 @@ bwa_dir="${work_dir}/output/04_bwa"
 markdup_dir="${work_dir}/output/05_markduplicated"
 if [ ! -d "$markdup_dir" ]; then mkdir -p "$markdup_dir"; fi
 
-# Mark duplicates and index for one sample.
+# Mark duplicates first, verify the BAM exists, then create its index.
 run_markdup() {
   local sample_id=$1
   local sorted_bam="${bwa_dir}/${sample_id}.sorted.bam"

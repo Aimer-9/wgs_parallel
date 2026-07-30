@@ -1,4 +1,15 @@
 #!/bin/bash
+# Stage 03: quality control for paired reads produced by Stage 02.
+#
+# Positional arguments:
+#   1 work_dir; 2 FastQC executable; 3 CPU fraction;
+#   4 maximum sample-pair jobs; 5 SeqKit threads; 6 FastQC extra arguments;
+#   7 MultiQC command; 8 SeqKit command; 9 Conda executable.
+#
+# Input files are output/02_trim/<sample>_{1,2}_paired.fq.gz. As in Stage 01,
+# each FASTQ is one GNU Parallel task because one FastQC input uses one analysis
+# worker. Results, task metadata, MultiQC, and SeqKit summaries are written to
+# output/03_fastqc_trim. Interrupted per-file results are removed and retried.
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 source "${REPO_DIR}/scripts/00_util.sh"
 
@@ -18,6 +29,7 @@ mkdir -p "$fastqc_trim_dir"
 fastqc_tasks="${fastqc_trim_dir}/fastq_tasks.txt"
 : > "$fastqc_tasks"
 
+# Validate every expected trimmed pair before starting any parallel work.
 while IFS= read -r sample_id; do
   [ -z "$sample_id" ] && continue
   paired_1="${trim_dir}/${sample_id}_1_paired.fq.gz"
@@ -71,15 +83,15 @@ echo "FastQC resources: ${num_fastq} files, ${MAX_FASTQC_FILE_JOBS} parallel one
 parallel_run_sample_list "$fastqc_tasks" "$MAX_FASTQC_FILE_JOBS" run_fastqc_trim fastqc_trim || exit 1
 date +"%Y-%m-%d %H:%M:%S" && echo -e "\e[37;42mfastqc_trim: all done\e[m"
 
-# Aggregate post-trim FastQC reports with MultiQC
+# Aggregate all post-trim reports in the stage output directory.
 if [ ! -s "${fastqc_trim_dir}/multiqc_report.html" ]; then
-  "$conda_bin" run --no-capture-output -n multiqc "$multiqc" "$fastqc_trim_dir" --outdir "$fastqc_trim_dir"
+  "$conda_bin" run --no-capture-output -n wgs_parallel "$multiqc" "$fastqc_trim_dir" --outdir "$fastqc_trim_dir"
 fi
 date +"%Y-%m-%d %H:%M:%S" && echo -e "\e[37;42mfastqc_trim: multiqc done\e[m"
 
-# Seqkit Q30/Q20 stats on trimmed paired reads
+# Summarize only paired reads, since unpaired reads are not aligned downstream.
 if [ ! -s "${fastqc_trim_dir}/seqkit_stats.txt" ]; then
-  "$conda_bin" run --no-capture-output -n seqkit "$seqkit" stats "${trim_dir}/"*_paired.fq.gz -aT -j "$MAX_Q30_STAT_THREADS" \
+  "$conda_bin" run --no-capture-output -n wgs_parallel "$seqkit" stats "${trim_dir}/"*_paired.fq.gz -aT -j "$MAX_Q30_STAT_THREADS" \
     -o "${fastqc_trim_dir}/seqkit_stats.txt"
 fi
 date +"%Y-%m-%d %H:%M:%S" && echo -e "\e[37;42mfastqc_trim: seqkit stats done\e[m"

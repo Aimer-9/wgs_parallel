@@ -1,4 +1,17 @@
 #!/bin/bash
+# Stage 06: GATK base quality score recalibration (BQSR).
+#
+# Positional arguments:
+#   1 work_dir; 2 reference build; 3 GATK; 4 samtools; 5 reference FASTA;
+#   6 known indels; 7 dbSNP; 8 Mills indels; 9 CPU fraction;
+#  10 maximum concurrent samples; 11 minimum acceptable BAM bytes;
+#  12 BaseRecalibrator extra arguments.
+#
+# Input BAMs come from output/05_markduplicated. For every sample this stage
+# builds a recalibration report, applies it to a new BAM, and indexes that BAM
+# under output/06_bqsr. The minimum-size guard catches common truncated writes.
+# Checkpoint recovery conservatively removes the report, BAM, and indexes for an
+# interrupted sample so all dependent BQSR work is regenerated consistently.
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 source "${REPO_DIR}/scripts/00_util.sh"
 
@@ -25,9 +38,8 @@ markdup_dir="${work_dir}/output/05_markduplicated"
 bqsr_dir="${work_dir}/output/06_bqsr"
 mkdir -p "$bqsr_dir"
 
-# BaseRecalibrator, ApplyBQSR, and index for one sample.
-# Re-runs ApplyBQSR if the output BAM exists but is smaller than 10 MB
-# (indicates a truncated write from a prior interrupted run).
+# BaseRecalibrator, ApplyBQSR, and index for one sample. ApplyBQSR is rerun when
+# an existing BAM is smaller than the configured minimum output size.
 run_bqsr() {
   local sample_id=$1
   local markdup_bam="${markdup_dir}/${sample_id}.sorted.markdup.bam"

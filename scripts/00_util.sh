@@ -1,5 +1,22 @@
 #!/bin/bash
 
+# Shared runtime library for wgs.sh and every numbered pipeline stage.
+#
+# This file is sourced rather than executed. It centralizes:
+#   - config.yaml/sample.csv parsing through config.py;
+#   - primary-contig discovery (1-22, X, Y, and MT only);
+#   - CPU allocation for local, Slurm, SGE, and PBS environments;
+#   - recursive FASTQ lookup using sample_id/sample_prefix metadata;
+#   - GNU Parallel execution with durable running/done checkpoints;
+#   - run logging, single-pipeline locking, and recursive process shutdown.
+#
+# Several functions read globals exported by config.py, especially work_dir,
+# sample_manifest_tsv, ref_fa, parallel_bin, and MAX_PROCESSOR_USE_PERCENT.
+# Worker functions passed to parallel_run_sample_list must accept one task
+# string. A matching cleanup_<worker_function> must remove partial outputs.
+
+# Load and validate YAML/CSV configuration, then evaluate shell-safe exports
+# emitted by config.py. CONFIG_YAML and SAMPLE_CSV can override default paths.
 load_pipeline_config() {
   local repo_dir=$1
   local config_yaml="${CONFIG_YAML:-${repo_dir}/config.yaml}"
@@ -23,6 +40,8 @@ load_pipeline_config() {
   eval "$exports"
 }
 
+# Convert an extra_args string into a Bash array using Python shlex rules.
+# This preserves quoted values without using unsafe shell word splitting.
 read_extra_args() {
   local value=$1
   local -n target_ref=$2
@@ -33,6 +52,8 @@ read_extra_args() {
   target_ref=("${parsed[@]}")
 }
 
+# Write the canonical 25-contig task table used by germline and somatic callers.
+# The generated columns are: order, logical_name, reference_contig, length.
 prepare_primary_contigs() {
   local output="${work_dir}/primary_contigs.tsv"
   python3 "${REPO_DIR}/scripts/config.py" contigs --fasta "$ref_fa" > "$output" || return 1
@@ -44,6 +65,8 @@ prepare_primary_contigs() {
   export primary_contigs_tsv
 }
 
+# Return the CPU allocation visible to this job. Explicit WGS_CPUS wins, then
+# common scheduler variables, with nproc used for an unmanaged local process.
 available_cpus() {
   if [ -n "${WGS_CPUS:-}" ]; then
     echo "$WGS_CPUS"
@@ -58,12 +81,15 @@ available_cpus() {
   fi
 }
 
+# Convert a configured CPU fraction (for example 0.8) into an integer budget.
 calculate_cpu_budget() {
   local fraction=$1
   awk -v cpus="$(available_cpus)" -v fraction="$fraction" \
     'BEGIN { value=int(cpus*fraction); print value < 1 ? 1 : value }'
 }
 
+# Cap GNU Parallel workers by the configured maximum, task count, and CPU
+# budget. At least one worker is retained so small jobs can still execute.
 limit_parallel_jobs() {
   local fraction=$1
   local requested_jobs=$2
@@ -76,6 +102,7 @@ limit_parallel_jobs() {
   echo "$requested_jobs"
 }
 
+# Calculate uniform threads per worker without exceeding the CPU budget.
 calculate_threads() {
   local fraction=$1
   local jobs=$2
@@ -85,6 +112,8 @@ calculate_threads() {
     'BEGIN { value=int(cpus/jobs); print value < 1 ? 1 : value }'
 }
 
+# Redirect stdout/stderr through tee into output/logs while preserving terminal
+# output. Each invocation gets a timestamp/PID-specific main and Parallel log.
 init_run_logging() {
   local command_name=$1
   local timestamp
@@ -98,6 +127,8 @@ init_run_logging() {
   echo "Run log: $run_log"
 }
 
+# Find one R1 or R2 FASTQ recursively below raw_dir. sample_prefix is matched
+# literally, while common _R1/_R2 and _1/_2 naming conventions are accepted.
 find_read_in_dir() {
   local sample_id=$1
   local raw_dir=$2
@@ -121,6 +152,8 @@ find_read_in_dir() {
   echo "$found"
 }
 
+# Resolve sample_prefix and raw_dir from the normalized TSV manifest, then call
+# find_read_in_dir. Errors if sample_id has no manifest entry.
 find_sample_read() {
   local sample_id=$1
   local manifest_tsv=$2
@@ -137,6 +170,9 @@ find_sample_read() {
   find_read_in_dir "$sample_id" "$raw_dir" "$read_tag" "$sample_prefix"
 }
 
+# Rebuild sample_list.txt and verify that every manifest row resolves to a pair
+# of FASTQs. Reads stay in their configured raw_dir; no staging directory is
+# created by the main pipeline.
 prepare_sample_inputs() {
   if [ ! -f "${sample_manifest_tsv}" ]; then
     echo "Error: sample manifest not found: ${sample_manifest_tsv}"
@@ -164,6 +200,7 @@ prepare_sample_inputs() {
   done < "${sample_manifest_tsv}"
 }
 
+# Accept GNU Parallel either from PATH or as an executable configured path.
 require_gnu_parallel() {
   if ! command -v "${parallel_bin:-parallel}" >/dev/null 2>&1 && [ ! -x "${parallel_bin:-}" ]; then
     echo "Error: GNU parallel is required but not found in PATH"
@@ -172,6 +209,15 @@ require_gnu_parallel() {
   fi
 }
 
+# Execute a one-task-per-line file with GNU Parallel.
+#
+# Arguments:
+#   1 task file; 2 maximum workers; 3 exported worker function;
+#   4 checkpoint/job-log tag; 5 GNU Parallel --halt policy (optional).
+#
+# Before execution, stale running markers are recovered with the matching
+# cleanup_<worker> function. run_worker.sh writes a running marker before the
+# tool starts and replaces it with a done marker only after a zero exit status.
 parallel_run_sample_list() {
   local sample_list_file=$1
   local max_jobs=$2
@@ -245,6 +291,8 @@ parallel_run_sample_list() {
     bash "$worker_runner" "$worker_func" {} "$checkpoint_dir" :::: "$sample_list_file"
 }
 
+# Create the process lock used to prevent two top-level pipelines from sharing
+# one repository. A dead PID identifies a stale lock and is recovered safely.
 init_pipeline_control_files() {
   local wd=$1
   local control_dir="${wd}/.wgs_parallel_control"
@@ -267,12 +315,15 @@ init_pipeline_control_files() {
   echo "$$" > "$pid_file"
 }
 
+# Remove the transient top-level PID and lock after normal exit or handled stop.
 cleanup_pipeline_control_files() {
   local wd=$1
   local control_dir="${wd}/.wgs_parallel_control"
   rm -f "${control_dir}/pipeline.pid" "${control_dir}/pipeline.lock"
 }
 
+# Walk the process tree depth-first so stop can terminate grandchildren created
+# by GNU Parallel, Conda, Java, GATK, samtools, and shell pipelines.
 collect_child_pids_recursive() {
   local parent_pid=$1
   local child=""
@@ -285,6 +336,8 @@ collect_child_pids_recursive() {
   done < <(ps -o pid= --ppid "$parent_pid" 2>/dev/null)
 }
 
+# Terminate the recorded pipeline and all descendants, escalating from TERM to
+# KILL only for processes that remain alive after the grace period.
 stop_pipeline_process_group() {
   local wd=$1
   local control_dir="${wd}/.wgs_parallel_control"

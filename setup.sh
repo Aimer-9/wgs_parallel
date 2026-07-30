@@ -1,6 +1,23 @@
 #!/bin/bash
-# setup.sh -- install software, create conda environments, download references,
-# and update machine paths in config.yaml.
+# Bootstrap and validate the software/reference environment used by wgs.sh.
+#
+# The default setup performs three independently selectable operations:
+#   1. install command-line tools beneath ./tools;
+#   2. create the reproducible wgs_parallel Conda environment containing Python,
+#      MultiQC, SeqKit, mosdepth, and ClinVar updater dependencies;
+#   3. download hg19 and/or hg38 references beneath ./ref.
+#
+# Machine-detected paths are merged with example/config/config.yaml to produce
+# the user's config.yaml without discarding documented parameter defaults.
+# Downloads and installations are restart-aware and validation can be run alone
+# with no changes. Interactive permission prompts precede optional downloads;
+# software tasks are queued and may execute concurrently where safe.
+#
+# Common examples:
+#   bash setup.sh
+#   bash setup.sh download-tools --tools-dir /opt/wgs-tools
+#   bash setup.sh download-ref --build 38 --ref-dir /data/references
+#   bash setup.sh validate-only --validate-tools
 
 REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
 PREFIX="${REPO_DIR}/tools"
@@ -335,9 +352,9 @@ write_config() {
   if command -v conda >/dev/null 2>&1; then
     local conda_base
     conda_base=$(conda info --base 2>/dev/null || true)
-    [ -z "$multiqc_valid" ] && multiqc_valid="${conda_base}/envs/multiqc/bin/multiqc"
-    [ -z "$seqkit_valid" ] && seqkit_valid="${conda_base}/envs/seqkit/bin/seqkit"
-    [ -z "$mosdepth_exec" ] && mosdepth_exec="${conda_base}/envs/mosdepth/bin/mosdepth"
+    [ -z "$multiqc_valid" ] && multiqc_valid="${conda_base}/envs/wgs_parallel/bin/multiqc"
+    [ -z "$seqkit_valid" ] && seqkit_valid="${conda_base}/envs/wgs_parallel/bin/seqkit"
+    [ -z "$mosdepth_exec" ] && mosdepth_exec="${conda_base}/envs/wgs_parallel/bin/mosdepth"
   fi
   [ -n "$multiqc_valid" ] || multiqc_valid=multiqc
   [ -n "$seqkit_valid" ] || seqkit_valid=seqkit
@@ -746,24 +763,13 @@ if $DO_CONDA; then
     fi
   }
 
-  create_env multiqc multiqc
-  create_env seqkit seqkit
-  create_env mosdepth mosdepth
-
-  update_db_dir="${annovar_path}/update_annovar_db"
-  if conda_env_exists "update_annovar_db"; then
-    echo -e "${SKIP}  conda env 'update_annovar_db' already exists"
+  if conda_env_exists wgs_parallel; then
+    echo -e "${SKIP}  conda env 'wgs_parallel' already exists"
   else
-    if [ ! -d "$update_db_dir" ]; then
-      git clone https://github.com/mobidic/update_annovar_db.git "$update_db_dir"
-    fi
-    if [ -f "${update_db_dir}/environment.yml" ]; then
-      conda env create -f "${update_db_dir}/environment.yml" \
-        && echo -e "${PASS}  conda env 'update_annovar_db'" \
-        || echo -e "${FAIL}  conda env 'update_annovar_db'"
-    else
-      echo -e "${FAIL}  ${update_db_dir}/environment.yml not found"
-    fi
+    log "Creating conda env from ${REPO_DIR}/wgs_parallel.yml"
+    conda env create -f "${REPO_DIR}/wgs_parallel.yml" \
+      && echo -e "${PASS}  conda env 'wgs_parallel'" \
+      || echo -e "${FAIL}  conda env 'wgs_parallel'"
   fi
 fi
 
@@ -823,7 +829,7 @@ printf "    %-30s %s\n" "mosdepth scripts" "$([ -f "${mosdepth_path}/scripts/plo
 printf "    %-30s %s\n" "ANNOVAR" "$([ -f "${annovar_path}/table_annovar.pl" ] && echo OK || echo MANUAL)"
 echo ""
 echo "  Conda environments"
-for env in multiqc seqkit mosdepth update_annovar_db; do
+for env in wgs_parallel; do
   printf "    %-30s %s\n" "$env" "$(conda_env_exists "$env" && echo OK || echo MISSING)"
 done
 echo ""

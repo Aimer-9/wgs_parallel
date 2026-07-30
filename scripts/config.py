@@ -1,5 +1,21 @@
 #!/usr/bin/env python3
-"""Configuration, sample manifest, and primary-contig handling for wgs_parallel."""
+"""Configuration and metadata normalization for the WGS pipeline.
+
+This command has three subcommands:
+
+``load``
+    Validate config.yaml and sample.csv, write a headerless normalized TSV
+    manifest, and print shell-quoted ``export`` statements consumed by wgs.sh.
+``contigs``
+    Read a FASTA index/dictionary and emit the ordered primary chromosomes
+    1-22, X, Y, and MT while preserving reference-specific names such as chrM.
+``merge-machine``
+    Merge machine-detected tool/reference paths into the example YAML template
+    without discarding the template's documented parameter defaults.
+
+All user-facing validation failures are raised as ConfigError so the CLI can
+print concise messages without Python tracebacks.
+"""
 
 from __future__ import annotations
 
@@ -18,10 +34,13 @@ except ModuleNotFoundError as exc:  # pragma: no cover - exercised by setup vali
 
 
 class ConfigError(Exception):
+    """Expected configuration or sample-input validation failure."""
+
     pass
 
 
 def load_yaml(path: Path) -> dict[str, Any]:
+    """Load one YAML mapping and reject unreadable or non-mapping roots."""
     try:
         data = yaml.safe_load(path.read_text(encoding="utf-8"))
     except (OSError, yaml.YAMLError) as exc:
@@ -32,6 +51,7 @@ def load_yaml(path: Path) -> dict[str, Any]:
 
 
 def mapping(parent: dict[str, Any], key: str) -> dict[str, Any]:
+    """Return a nested mapping, treating an omitted/null section as empty."""
     value = parent.get(key, {})
     if value is None:
         return {}
@@ -41,6 +61,7 @@ def mapping(parent: dict[str, Any], key: str) -> dict[str, Any]:
 
 
 def scalar(section: dict[str, Any], key: str, default: Any = "") -> str:
+    """Read a scalar as text while rejecting accidental lists/mappings."""
     value = section.get(key, default)
     if value is None:
         return ""
@@ -50,6 +71,7 @@ def scalar(section: dict[str, Any], key: str, default: Any = "") -> str:
 
 
 def integer(section: dict[str, Any], key: str, default: int, minimum: int = 1) -> str:
+    """Validate an integer parameter and return its shell-exportable text."""
     value = section.get(key, default)
     if isinstance(value, bool):
         raise ConfigError(f"'{key}' must be an integer")
@@ -63,6 +85,7 @@ def integer(section: dict[str, Any], key: str, default: int, minimum: int = 1) -
 
 
 def decimal(section: dict[str, Any], key: str, default: float) -> str:
+    """Validate a CPU fraction in the inclusive range (0, 1]."""
     value = section.get(key, default)
     try:
         parsed = float(value)
@@ -74,6 +97,7 @@ def decimal(section: dict[str, Any], key: str, default: float) -> str:
 
 
 def yes_no(section: dict[str, Any], key: str, default: str = "no") -> str:
+    """Normalize a strict YAML yes/no setting to lowercase text."""
     value = scalar(section, key, default).lower()
     if value not in {"yes", "no"}:
         raise ConfigError(f"'{key}' must be 'yes' or 'no'")
@@ -81,6 +105,11 @@ def yes_no(section: dict[str, Any], key: str, default: str = "no") -> str:
 
 
 def extra_args(section: dict[str, Any], key: str = "extra_args", default: str = "", forbidden=()) -> str:
+    """Validate shell-like extra arguments and block pipeline-owned options.
+
+    The string is parsed with shlex only for validation. Stage scripts parse it
+    again into Bash arrays, preserving quoted argument values without eval.
+    """
     value = scalar(section, key, default)
     try:
         tokens = shlex.split(value)
@@ -93,7 +122,31 @@ def extra_args(section: dict[str, Any], key: str = "extra_args", default: str = 
     return value
 
 
+def comma_items(value: str, field: str) -> list[str]:
+    """Split a comma list and reject empty entries that shift ANNOVAR columns."""
+    items = [item.strip() for item in value.split(",")]
+    if not items or any(not item for item in items):
+        raise ConfigError(f"'{field}' must be a comma-separated list without empty entries")
+    return items
+
+
+def suggest_annovar_operations(protocols: list[str]) -> str:
+    """Suggest ANNOVAR operation types for common gene/region/filter databases."""
+    gene_protocols = {"refgene", "knowngene", "ensgene"}
+    operations = []
+    for protocol in protocols:
+        lowered = protocol.lower()
+        if lowered in gene_protocols:
+            operations.append("g")
+        elif lowered == "cytoband":
+            operations.append("r")
+        else:
+            operations.append("f")
+    return ",".join(operations)
+
+
 def normalize_ref(raw: str) -> str:
+    """Normalize hg19/GRCh37 to 19 and hg38/GRCh38 to 38."""
     value = raw.strip().lower().replace("grch", "").replace("hg", "")
     if value in {"19", "37"}:
         return "19"
@@ -103,6 +156,12 @@ def normalize_ref(raw: str) -> str:
 
 
 def load_samples(path: Path) -> list[dict[str, str]]:
+    """Validate sample.csv and return normalized absolute-path records.
+
+    Required columns are sample_id, sample_prefix, ref_version, and raw_dir.
+    normal_id and normal_bam are optional. A run must use one reference build,
+    sample IDs must be unique/shell-safe, and every raw_dir must already exist.
+    """
     rows: list[dict[str, str]] = []
     try:
         handle = path.open("r", encoding="utf-8-sig", newline="")
@@ -150,10 +209,17 @@ def load_samples(path: Path) -> list[dict[str, str]]:
 
 
 def q(value: Any) -> str:
+    """Quote one value for safe evaluation by the calling Bash process."""
     return shlex.quote(str(value))
 
 
 def build_environment(config: dict[str, Any], samples: list[dict[str, str]]) -> dict[str, str]:
+    """Flatten YAML tools, references, and parameters into shell variables.
+
+    Defaults are applied here so stage scripts receive a complete contract even
+    when optional YAML keys are omitted. Extra-argument fields also declare
+    options owned by the pipeline that users must not override.
+    """
     work_dir = scalar(config, "work_dir")
     if not work_dir:
         raise ConfigError("missing required field: work_dir")
@@ -180,6 +246,36 @@ def build_environment(config: dict[str, Any], samples: list[dict[str, str]]) -> 
     vqsr = mapping(parameters, "vqsr")
     annovar = mapping(parameters, "annovar")
     mutect = mapping(parameters, "mutect2")
+
+    annovar_protocol = scalar(annovar, "protocol", "refGene,cytoBand,avsnp150,exac03,{clinvar}")
+    annovar_operation = scalar(annovar, "operation", "g,r,f,f,f")
+    protocol_items = comma_items(annovar_protocol, "parameters.annovar.protocol")
+    operation_items = comma_items(annovar_operation, "parameters.annovar.operation")
+    malformed_placeholders = [
+        item for item in protocol_items
+        if ("{" in item or "}" in item) and item != "{clinvar}"
+    ]
+    if malformed_placeholders:
+        raise ConfigError(
+            "parameters.annovar.protocol contains malformed placeholder(s): "
+            + ", ".join(malformed_placeholders)
+            + "; only the exact token {clinvar} may contain braces"
+        )
+    if protocol_items.count("{clinvar}") > 1:
+        raise ConfigError("parameters.annovar.protocol may contain {clinvar} only once")
+    if len(protocol_items) != len(operation_items):
+        suggestion = suggest_annovar_operations(protocol_items)
+        raise ConfigError(
+            "parameters.annovar protocol/operation count mismatch: "
+            f"{len(protocol_items)} protocols but {len(operation_items)} operations; "
+            f"set operation to a {len(protocol_items)}-item list, for example: {suggestion}"
+        )
+    invalid_operations = sorted(set(operation_items) - {"g", "r", "f"})
+    if invalid_operations:
+        raise ConfigError(
+            "parameters.annovar.operation supports only g, r, or f; invalid: "
+            + ", ".join(invalid_operations)
+        )
 
     env = {
         "work_dir": os.path.abspath(work_dir),
@@ -247,8 +343,8 @@ def build_environment(config: dict[str, Any], samples: list[dict[str, str]]) -> 
         "VQSR_INDEL_TRUTH_SENSITIVITY": scalar(vqsr, "indel_truth_sensitivity", "99.0"),
         "VQSR_EXTRA_ARGS": extra_args(vqsr, forbidden=("-V", "-O", "-R", "-mode")),
         "MAX_ANNOVAR_JOBS": integer(annovar, "max_jobs", 10),
-        "ANNOVAR_PROTOCOL": scalar(annovar, "protocol", "refGene,cytoBand,{clinvar},avsnp150,exac03"),
-        "ANNOVAR_OPERATION": scalar(annovar, "operation", "g,r,f,f,f"),
+        "ANNOVAR_PROTOCOL": annovar_protocol,
+        "ANNOVAR_OPERATION": annovar_operation,
         "ANNOVAR_EXTRA_ARGS": extra_args(annovar),
         "MAX_MUTECT2_JOBS": integer(mutect, "max_jobs", 10),
         "MUTECT2_EXTRA_ARGS": extra_args(mutect, forbidden=("-I", "-O", "-R", "-L", "--intervals", "-XL", "--exclude-intervals", "-normal", "--normal-sample")),
@@ -258,6 +354,7 @@ def build_environment(config: dict[str, Any], samples: list[dict[str, str]]) -> 
 
 
 def command_load(args: argparse.Namespace) -> None:
+    """Implement ``load``: write the TSV manifest and print Bash exports."""
     config_path = Path(args.config).resolve()
     sample_path = Path(args.samples).resolve()
     config = load_yaml(config_path)
@@ -278,6 +375,7 @@ def command_load(args: argparse.Namespace) -> None:
 
 
 def read_reference_contigs(fasta: Path) -> list[tuple[str, int]]:
+    """Read contig names/lengths from FASTA .fai, falling back to .dict."""
     fai = Path(f"{fasta}.fai")
     dictionary = fasta.with_suffix(".dict")
     contigs: list[tuple[str, int]] = []
@@ -299,6 +397,7 @@ def read_reference_contigs(fasta: Path) -> list[tuple[str, int]]:
 
 
 def command_contigs(args: argparse.Namespace) -> None:
+    """Emit the ordered 25-contig table using names present in the reference."""
     contigs = read_reference_contigs(Path(args.fasta))
     by_name = {name: length for name, length in contigs}
     logical_names = [str(i) for i in range(1, 23)] + ["X", "Y", "MT"]
@@ -316,6 +415,7 @@ def command_contigs(args: argparse.Namespace) -> None:
 
 
 def command_merge_machine(args: argparse.Namespace) -> None:
+    """Overlay detected machine paths on the distributable YAML template."""
     output = Path(args.output).resolve()
     base_path = output if output.is_file() else Path(args.template).resolve()
     base = load_yaml(base_path)
@@ -337,6 +437,7 @@ def command_merge_machine(args: argparse.Namespace) -> None:
 
 
 def parser() -> argparse.ArgumentParser:
+    """Build the subcommand-oriented command-line parser."""
     root = argparse.ArgumentParser()
     sub = root.add_subparsers(dest="command", required=True)
     load = sub.add_parser("load")
@@ -356,6 +457,7 @@ def parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
+    """Dispatch the CLI and translate ConfigError into a concise exit message."""
     args = parser().parse_args()
     try:
         args.func(args)

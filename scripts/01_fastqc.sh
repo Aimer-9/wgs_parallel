@@ -1,4 +1,23 @@
 #!/bin/bash
+# Stage 01: raw-read quality control.
+#
+# Called by wgs.sh; positional arguments:
+#   1 work_dir                  Pipeline working directory.
+#   2 sample_manifest_tsv       Normalized sample metadata from config.py.
+#   3 fastqc                    FastQC executable or absolute path.
+#   4 CPU fraction              Fraction of allocated CPUs available to stage.
+#   5 max sample-pair jobs      Upper bound before R1/R2 expansion (default 10).
+#   6 seqkit threads            Threads used for aggregate read statistics.
+#   7 FastQC extra_args         Shell-style optional FastQC arguments.
+#   8 multiqc command           Command executed in Conda env "wgs_parallel".
+#   9 seqkit command            Command executed in Conda env "wgs_parallel".
+#  10 conda executable          Conda used for MultiQC and SeqKit.
+#
+# Inputs are discovered from each sample's raw_dir in the manifest. R1 and R2
+# are separate one-thread FastQC tasks because FastQC -t controls simultaneous
+# files, not CPU threads per file. Outputs, the task list, MultiQC report, and
+# SeqKit table are written to output/01_fastqc. Existing reports are resumable;
+# checkpoint recovery removes only an interrupted file's HTML/ZIP pair.
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 source "${REPO_DIR}/scripts/00_util.sh"
 
@@ -18,6 +37,8 @@ mkdir -p "$fastqc_dir"
 fastqc_tasks="${fastqc_dir}/fastq_tasks.txt"
 : > "$fastqc_tasks"
 
+# Materialize absolute FASTQ paths once so GNU Parallel workers do not repeat
+# manifest lookup and so missing pairs fail before any FastQC job is launched.
 while IFS= read -r sample_id; do
   [ -z "$sample_id" ] && continue
   read_1=$(find_sample_read "$sample_id" "$sample_manifest_tsv" R1) || exit 1
@@ -70,13 +91,13 @@ echo "FastQC resources: ${num_fastq} files, ${MAX_FASTQC_FILE_JOBS} parallel one
 parallel_run_sample_list "$fastqc_tasks" "$MAX_FASTQC_FILE_JOBS" run_fastqc fastqc || exit 1
 date +"%Y-%m-%d %H:%M:%S" && echo -e "\e[37;42mfastqc: all done\e[m"
 
-# Aggregate FastQC reports with MultiQC
+# Aggregate every raw FastQC result into a single interactive HTML report.
 if [ ! -s "${fastqc_dir}/multiqc_report.html" ]; then
-  "$conda_bin" run --no-capture-output -n multiqc "$multiqc" "$fastqc_dir" --outdir "$fastqc_dir"
+  "$conda_bin" run --no-capture-output -n wgs_parallel "$multiqc" "$fastqc_dir" --outdir "$fastqc_dir"
 fi
 date +"%Y-%m-%d %H:%M:%S" && echo -e "\e[37;42mfastqc: multiqc done\e[m"
 
-# Seqkit Q30/Q20 stats on raw reads
+# Calculate one tabular SeqKit summary across the exact R1/R2 inputs above.
 if [ ! -s "${fastqc_dir}/seqkit_stats.txt" ]; then
   seqkit_inputs=()
   while IFS= read -r sample_id; do
@@ -84,7 +105,7 @@ if [ ! -s "${fastqc_dir}/seqkit_stats.txt" ]; then
     seqkit_inputs+=("$(find_sample_read "$sample_id" "$sample_manifest_tsv" R1)")
     seqkit_inputs+=("$(find_sample_read "$sample_id" "$sample_manifest_tsv" R2)")
   done < "${work_dir}/sample_list.txt"
-  "$conda_bin" run --no-capture-output -n seqkit "$seqkit" stats "${seqkit_inputs[@]}" -aT -j "$MAX_Q30_STAT_THREADS" \
+  "$conda_bin" run --no-capture-output -n wgs_parallel "$seqkit" stats "${seqkit_inputs[@]}" -aT -j "$MAX_Q30_STAT_THREADS" \
     -o "${fastqc_dir}/seqkit_stats.txt"
 fi
 date +"%Y-%m-%d %H:%M:%S" && echo -e "\e[37;42mfastqc: seqkit stats done\e[m"

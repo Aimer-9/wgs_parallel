@@ -1,4 +1,20 @@
 #!/bin/bash
+# Stage 08: per-sample genotyping, variant quality score recalibration, and PASS
+# filtering for germline calls.
+#
+# Positional arguments:
+#   1 work_dir; 2 reference build; 3 GATK; 4 reference FASTA;
+#   5 known indels; 6 dbSNP; 7 Mills; 8 HapMap; 9 1000G Omni;
+#  10 1000G Phase 1; 11 VQSR jobs; 12 GenotypeGVCFs job limit;
+#  13 genotype extra args; 14 SNP truth sensitivity;
+#  15 INDEL truth sensitivity; 16 VQSR extra args; 17 bcftools.
+#
+# Input indexed GVCFs come from output/07_HaplotypeCaller. Each sample proceeds
+# through GenotypeGVCFs, separate SNP/INDEL model training, SNP then INDEL model
+# application, and a final bcftools PASS-only VCF in output/08_VQSR. Existing
+# intermediate outputs allow normal resume; if a checkpoint says the compound
+# task was interrupted, all outputs for that sample are cleared to avoid mixing
+# products from inconsistent recalibration attempts.
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 source "${REPO_DIR}/scripts/00_util.sh"
 
@@ -28,9 +44,8 @@ haplotype_dir="${work_dir}/output/07_HaplotypeCaller"
 vqsr_dir="${work_dir}/output/08_VQSR"
 if [ ! -d "$vqsr_dir" ]; then mkdir -p "$vqsr_dir"; fi
 
-# Full VQSR pipeline for one sample:
-#   GenotypeGVCFs → VariantRecalibrator (SNP + INDEL)
-#   → ApplyVQSR (SNP + INDEL) → bcftools PASS filter
+# Full per-sample order:
+# GenotypeGVCFs -> train SNP/INDEL models -> apply SNP/INDEL -> retain PASS.
 run_vqsr() {
   local sample_id=$1
   local gvcf="${haplotype_dir}/${sample_id}.g.vcf.gz"
@@ -66,7 +81,7 @@ run_vqsr() {
     echo "Error: genotyped VCF missing for ${sample_id}"; return 1
   fi
 
-  # VariantRecalibrator — SNP
+  # Train the SNP model from truth/training resources using SNP annotations.
   if [ ! -s "$recal_snp" ]; then
     date +"%Y-%m-%d %H:%M:%S" && echo -e "\e[37;42mVQSR SNP recal: ${sample_id} processing\e[m"
     "$gatk" VariantRecalibrator \
@@ -88,7 +103,7 @@ run_vqsr() {
     echo -e "\e[37;42mVQSR SNP recal: ${sample_id} exists\e[m"
   fi
 
-  # VariantRecalibrator — INDEL
+  # Train the INDEL model independently with Mills as the primary truth set.
   if [ ! -s "$recal_indel" ]; then
     date +"%Y-%m-%d %H:%M:%S" && echo -e "\e[37;42mVQSR INDEL recal: ${sample_id} processing\e[m"
     "$gatk" VariantRecalibrator \
@@ -112,7 +127,7 @@ run_vqsr() {
     echo "Error: recalibration file(s) missing for ${sample_id}"; return 1
   fi
 
-  # ApplyVQSR — SNP
+  # Apply SNP recalibration at the configured truth-sensitivity threshold.
   if [ ! -s "$applied_snp" ]; then
     date +"%Y-%m-%d %H:%M:%S" && echo -e "\e[37;42mApplyVQSR SNP: ${sample_id} processing\e[m"
     "$gatk" ApplyVQSR \
@@ -128,7 +143,7 @@ run_vqsr() {
     echo -e "\e[37;42mApplyVQSR SNP: ${sample_id} exists\e[m"
   fi
 
-  # ApplyVQSR — INDEL (applied on top of SNP-recalibrated VCF)
+  # Apply INDEL recalibration on top of the already SNP-recalibrated VCF.
   if [ ! -s "$applied_both" ]; then
     date +"%Y-%m-%d %H:%M:%S" && echo -e "\e[37;42mApplyVQSR INDEL: ${sample_id} processing\e[m"
     "$gatk" ApplyVQSR \
@@ -148,7 +163,7 @@ run_vqsr() {
     echo "Error: VQSR-applied VCF missing for ${sample_id}"; return 1
   fi
 
-  # Filter PASS variants only
+  # Produce the compact downstream input used by germline ANNOVAR annotation.
   if [ ! -s "$final_vcf" ]; then
     date +"%Y-%m-%d %H:%M:%S" && echo -e "\e[37;42mPASS filter: ${sample_id} processing\e[m"
     "$bcftools" view -f PASS "$applied_both" -o "$final_vcf"
