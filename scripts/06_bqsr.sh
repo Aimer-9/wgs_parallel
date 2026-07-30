@@ -4,14 +4,12 @@
 # Positional arguments:
 #   1 work_dir; 2 reference build; 3 GATK; 4 samtools; 5 reference FASTA;
 #   6 known indels; 7 dbSNP; 8 Mills indels; 9 CPU fraction;
-#  10 maximum concurrent samples; 11 minimum acceptable BAM bytes;
-#  12 BaseRecalibrator extra arguments.
+#  10 maximum concurrent samples; 11 BaseRecalibrator extra arguments.
 #
 # Input BAMs come from output/05_markduplicated. For every sample this stage
 # builds a recalibration report, applies it to a new BAM, and indexes that BAM
-# under output/06_bqsr. The minimum-size guard catches common truncated writes.
-# Checkpoint recovery conservatively removes the report, BAM, and indexes for an
-# interrupted sample so all dependent BQSR work is regenerated consistently.
+# under output/06_bqsr. Checkpoint recovery conservatively removes the report,
+# BAM, and indexes for an interrupted sample so dependent work is regenerated.
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 source "${REPO_DIR}/scripts/00_util.sh"
 
@@ -25,8 +23,7 @@ dbsnp=$7
 Mills=$8
 MAX_PROCESSOR_USE_PERCENT=$9
 MAX_BQSR_JOBS=${10:-10}
-BQSR_MIN_OUTPUT_BYTES=${11:-10485760}
-BQSR_EXTRA_ARGS=${12:-}
+BQSR_EXTRA_ARGS=${11:-}
 
 num_samples=$(wc -l < "${work_dir}/sample_list.txt")
 nproc=$(nproc)
@@ -72,10 +69,7 @@ run_bqsr() {
     echo "Error: BQSR report missing for ${sample_id} — BaseRecalibrator may have failed"; return 1
   fi
 
-  # ApplyBQSR — also re-run if output BAM is suspiciously small (< 10 MB)
-  local bqsr_bam_size=0
-  [ -f "$bqsr_bam" ] && bqsr_bam_size=$(stat -c%s "$bqsr_bam")
-  if [ ! -s "$bqsr_bam" ] || [ "$bqsr_bam_size" -lt "$BQSR_MIN_OUTPUT_BYTES" ]; then
+  if [ ! -s "$bqsr_bam" ]; then
     date +"%Y-%m-%d %H:%M:%S" && echo -e "\e[37;42mApplyBQSR: ${sample_id} processing\e[m"
     "$gatk" ApplyBQSR \
       --verbosity WARNING \

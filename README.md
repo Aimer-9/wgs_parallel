@@ -78,6 +78,12 @@ existing `${sample_id}.g.vcf.gz` output. Missing shards resume independently;
 successful shards are removed after gathering unless
 `parameters.haplotype_caller.keep_scatter_gvcfs` is `yes`.
 
+Mutect2 likewise scatters each tumor-normal pair across the 25 primary contigs,
+then gathers the unfiltered shards before `FilterMutectCalls`. ANNOVAR annotates
+only the final gathered and filtered VCF, not chromosome shards or PASS extracts.
+Per-contig VCF, index, and statistics files are removed after the VCF and
+Mutect2 statistics have both been merged successfully.
+
 ## Commands And Layout
 
 ```bash

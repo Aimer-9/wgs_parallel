@@ -79,7 +79,6 @@ parameters:
     extra_args: ""
   bqsr:
     max_jobs: 10
-    minimum_output_bytes: 10485760
     extra_args: ""
   haplotype_caller:
     max_jobs: 10

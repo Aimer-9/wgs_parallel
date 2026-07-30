@@ -330,7 +330,6 @@ def build_environment(config: dict[str, Any], samples: list[dict[str, str]]) -> 
         "MAX_MARKDUP_JOBS": integer(markdup, "max_jobs", 10),
         "MARKDUP_EXTRA_ARGS": extra_args(markdup, forbidden=("-I", "-O", "-M")),
         "MAX_BQSR_JOBS": integer(bqsr, "max_jobs", 10),
-        "BQSR_MIN_OUTPUT_BYTES": integer(bqsr, "minimum_output_bytes", 10485760, 1),
         "BQSR_EXTRA_ARGS": extra_args(bqsr, forbidden=("-I", "-O", "-R", "--known-sites")),
         "MAX_HC_JOBS": integer(hc, "max_jobs", 10),
         "HC_NATIVE_THREADS": integer(hc, "native_threads", 1),

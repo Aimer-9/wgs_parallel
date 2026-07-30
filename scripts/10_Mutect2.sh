@@ -12,8 +12,9 @@
 # has normal_bam, an index, a dictionary compatible with all 25 primary contigs,
 # and one unambiguous normal sample name matching normal_id when supplied.
 # Eligible pairs are recorded in pairs.tsv; validation skips and calling failures
-# are recorded separately. Mutect2 is restricted to 1-22, X, Y, and MT, followed
-# by FilterMutectCalls and bcftools PASS filtering in output/10_Mutect2.
+# are recorded separately. Mutect2 is restricted to 1-22, X, Y, and MT. Each
+# sample/normal pair is scattered into one Mutect2 task per primary contig;
+# chromosome VCFs are gathered before FilterMutectCalls and PASS filtering.
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 source "${REPO_DIR}/scripts/00_util.sh"
 
@@ -34,12 +35,14 @@ FILTER_MUTECT_EXTRA_ARGS=${13:-}
 mutect2_dir="${work_dir}/output/10_Mutect2"
 bqsr_dir="${work_dir}/output/06_bqsr"
 pair_manifest="${mutect2_dir}/pairs.tsv"
+interval_manifest="${mutect2_dir}/intervals.tsv"
 skipped_pairs="${mutect2_dir}/skipped_pairs.tsv"
 failed_pairs="${mutect2_dir}/failed_pairs.tsv"
 success_samples="${mutect2_dir}/success_samples.txt"
 mkdir -p "$mutect2_dir"
 printf 'sample_id\tnormal_bam\treason\n' > "$skipped_pairs"
 : > "$pair_manifest"
+: > "$interval_manifest"
 : > "$success_samples"
 
 # Record non-runnable rows without stopping valid tumor-normal pairs.
@@ -114,27 +117,22 @@ while IFS= read -r manifest_row; do
     continue
   fi
   printf '%s\t%s\t%s\n' "$sample_id" "$normal_bam" "$normal_sample" >> "$pair_manifest"
+  while IFS=$'\t' read -r order logical contig length; do
+    printf '%s\t%s\t%s\t%s\n' "$sample_id" "$normal_bam" "$normal_sample" "$contig" >> "$interval_manifest"
+  done < "$primary_contigs_tsv"
 done < "$sample_manifest_tsv"
 
-run_mutect2_pair() {
+run_mutect2_interval() {
   local task=$1
-  local sample_id normal_bam normal_sample
-  IFS=$'\t' read -r sample_id normal_bam normal_sample <<< "$task"
+  local sample_id normal_bam normal_sample contig
+  IFS=$'\t' read -r sample_id normal_bam normal_sample contig <<< "$task"
   local tumor_bam="${bqsr_dir}/${sample_id}.sorted.markdup.bqsr.bam"
-  local unfiltered_vcf="${mutect2_dir}/${sample_id}.mutect2.unfiltered.vcf"
-  local filtered_vcf="${mutect2_dir}/${sample_id}.mutect2.filtered.vcf"
-  local pass_vcf="${mutect2_dir}/${sample_id}.mutect2.filtered.PASS.vcf"
-  local order logical contig length
-  local -a intervals=() mutect_extra=() filter_extra=()
-  # Build explicit intervals so alternate/random contigs never enter calling.
-  while IFS=$'\t' read -r order logical contig length; do
-    intervals+=("-L" "$contig")
-  done < "$primary_contigs_tsv"
+  local interval_vcf="${mutect2_dir}/${sample_id}.mutect2.${contig}.unfiltered.vcf"
+  local -a mutect_extra=()
   read_extra_args "$MUTECT2_EXTRA_ARGS" mutect_extra || return 1
-  read_extra_args "$FILTER_MUTECT_EXTRA_ARGS" filter_extra || return 1
 
-  if [ ! -s "$unfiltered_vcf" ]; then
-    echo "Mutect2: ${sample_id} processing"
+  if [ ! -s "$interval_vcf" ]; then
+    echo "Mutect2: ${sample_id} ${contig} processing"
     "$gatk" Mutect2 \
       --verbosity ERROR \
       -R "$ref_fa" \
@@ -143,9 +141,49 @@ run_mutect2_pair() {
       -normal "$normal_sample" \
       --germline-resource "$germline_resource" \
       --panel-of-normals "$panel_of_normals" \
-      "${intervals[@]}" \
+      -L "$contig" \
       "${mutect_extra[@]}" \
-      -O "$unfiltered_vcf" || return 1
+      -O "$interval_vcf" || return 1
+  fi
+  [ -s "$interval_vcf" ]
+}
+
+cleanup_run_mutect2_interval() {
+  local sample_id normal_bam normal_sample contig
+  IFS=$'\t' read -r sample_id normal_bam normal_sample contig <<< "$1"
+  rm -f "${mutect2_dir}/${sample_id}.mutect2.${contig}.unfiltered.vcf"*
+}
+
+finalize_mutect2_pair() {
+  local task=$1
+  local sample_id normal_bam normal_sample
+  IFS=$'\t' read -r sample_id normal_bam normal_sample <<< "$task"
+  local unfiltered_vcf="${mutect2_dir}/${sample_id}.mutect2.unfiltered.vcf"
+  local merged_stats="${unfiltered_vcf}.stats"
+  local filtered_vcf="${mutect2_dir}/${sample_id}.mutect2.filtered.vcf"
+  local pass_vcf="${mutect2_dir}/${sample_id}.mutect2.filtered.PASS.vcf"
+  local -a filter_extra=() gather_inputs=() stats_inputs=() interval_outputs=()
+  read_extra_args "$FILTER_MUTECT_EXTRA_ARGS" filter_extra || return 1
+
+  while IFS=$'\t' read -r order logical contig length; do
+    interval_vcf="${mutect2_dir}/${sample_id}.mutect2.${contig}.unfiltered.vcf"
+    [ -s "$interval_vcf" ] || return 1
+    [ -s "${interval_vcf}.stats" ] || return 1
+    gather_inputs+=("-I" "$interval_vcf")
+    stats_inputs+=("-stats" "${interval_vcf}.stats")
+    interval_outputs+=("$interval_vcf" "${interval_vcf}.idx" "${interval_vcf}.stats")
+  done < "$primary_contigs_tsv"
+
+  if [ ! -s "$unfiltered_vcf" ]; then
+    echo "GatherVcfs: ${sample_id} processing"
+    "$gatk" GatherVcfs "${gather_inputs[@]}" -O "$unfiltered_vcf" || return 1
+  fi
+  if [ ! -s "$merged_stats" ]; then
+    echo "MergeMutectStats: ${sample_id} processing"
+    "$gatk" MergeMutectStats "${stats_inputs[@]}" -O "$merged_stats" || return 1
+  fi
+  if [ -s "$unfiltered_vcf" ] && [ -s "$merged_stats" ]; then
+    rm -f "${interval_outputs[@]}"
   fi
   if [ ! -s "$filtered_vcf" ]; then
     echo "FilterMutectCalls: ${sample_id} processing"
@@ -153,6 +191,7 @@ run_mutect2_pair() {
       --verbosity ERROR \
       -R "$ref_fa" \
       -V "$unfiltered_vcf" \
+      --stats "$merged_stats" \
       "${filter_extra[@]}" \
       -O "$filtered_vcf" || return 1
   fi
@@ -162,7 +201,7 @@ run_mutect2_pair() {
   [ -s "$pass_vcf" ]
 }
 
-cleanup_run_mutect2_pair() {
+cleanup_finalize_mutect2_pair() {
   local sample_id normal_bam normal_sample
   IFS=$'\t' read -r sample_id normal_bam normal_sample <<< "$1"
   rm -f "${mutect2_dir}/${sample_id}.mutect2.unfiltered.vcf"* \
@@ -173,17 +212,18 @@ cleanup_run_mutect2_pair() {
 mutect_status=0
 if [ -s "$pair_manifest" ]; then
   echo "Mutect2: start"
-  parallel_run_sample_list "$pair_manifest" "$MAX_MUTECT2_JOBS" run_mutect2_pair mutect2 never || mutect_status=$?
+  parallel_run_sample_list "$interval_manifest" "$MAX_MUTECT2_JOBS" run_mutect2_interval mutect2_interval never || mutect_status=$?
+  parallel_run_sample_list "$pair_manifest" "$MAX_MUTECT2_JOBS" finalize_mutect2_pair mutect2_finalize never || mutect_status=$?
 else
   echo "Mutect2: no valid tumor-normal pairs"
 fi
 
-# Reconcile expected pair outputs after Parallel finishes. Only successful PASS
-# VCF samples are passed to Stage 11 somatic ANNOVAR annotation.
+# Reconcile expected pair outputs after Parallel finishes. Samples with a final
+# gathered and filtered VCF are passed to Stage 11 somatic ANNOVAR annotation.
 printf 'sample_id\tnormal_bam\treason\n' > "$failed_pairs"
 while IFS=$'\t' read -r sample_id normal_bam normal_sample; do
   [ -z "$sample_id" ] && continue
-  if [ -s "${mutect2_dir}/${sample_id}.mutect2.filtered.PASS.vcf" ]; then
+  if [ -s "${mutect2_dir}/${sample_id}.mutect2.filtered.vcf" ]; then
     echo "$sample_id" >> "$success_samples"
   else
     printf '%s\t%s\tcalling or filtering failed\n' "$sample_id" "$normal_bam" >> "$failed_pairs"

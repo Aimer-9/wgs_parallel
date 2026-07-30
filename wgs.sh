@@ -255,7 +255,7 @@ run_variant_steps() {
     "$MAX_BWA_JOBS" "$MAX_SORT_JOBS" "$MAX_INDEX_JOBS" "$MAX_MOSDEPTH_JOBS" "$BWA_EXTRA_ARGS" "$SORT_MEMORY_PER_THREAD" "$SORT_EXTRA_ARGS" "$mosdepth" "$MOSDEPTH_THREADS" "$MOSDEPTH_EXTRA_ARGS" "$conda_bin" "$SORT_THREADS_PER_JOB" || return 1
   bash "${SCRIPTS_DIR}/05_markduplicated.sh" "$work_dir" "$hsa_version" "$gatk" "$samtools" "$MAX_PROCESSOR_USE_PERCENT" "$MAX_MARKDUP_JOBS" "$MARKDUP_EXTRA_ARGS" || return 1
   bash "${SCRIPTS_DIR}/06_bqsr.sh" "$work_dir" "$hsa_version" "$gatk" "$samtools" "$ref_fa" "$known_indels" "$dbsnp" "$Mills" "$MAX_PROCESSOR_USE_PERCENT" \
-    "$MAX_BQSR_JOBS" "$BQSR_MIN_OUTPUT_BYTES" "$BQSR_EXTRA_ARGS" || return 1
+    "$MAX_BQSR_JOBS" "$BQSR_EXTRA_ARGS" || return 1
 
   bash "${SCRIPTS_DIR}/07_HaplotypeCaller.sh" "$work_dir" "$hsa_version" "$gatk" "$ref_fa" "$MAX_HC_JOBS" "$primary_contigs_tsv" "$HC_NATIVE_THREADS" "$HC_KEEP_SCATTER" "$HC_EXTRA_ARGS" || return 1
   bash "${SCRIPTS_DIR}/08_vqsr.sh"            "$work_dir" "$hsa_version" "$gatk" "$ref_fa" \
@@ -277,10 +277,12 @@ run_variant_steps() {
     bash "${SCRIPTS_DIR}/10_Mutect2.sh" \
       "$work_dir" "$sample_manifest_tsv" "$gatk" "$samtools" "$bcftools" "$hsa_version" "$ref_fa" \
       "$germline_resource" "$panel_of_normals" "$primary_contigs_tsv" "$MAX_MUTECT2_JOBS" "$MUTECT2_EXTRA_ARGS" "$FILTER_MUTECT_EXTRA_ARGS" || mutect_status=$?
+    # Annotate only the final VCF produced after chromosome gathering and
+    # FilterMutectCalls. Per-contig shards and the derived PASS VCF are skipped.
     bash "${SCRIPTS_DIR}/09_annovar.sh" \
       "$work_dir" "$hsa_version" "$annovar_path" \
       "${work_dir}/output/10_Mutect2" \
-      ".mutect2.filtered.PASS.vcf" \
+      ".mutect2.filtered.vcf" \
       "$MAX_PROCESSOR_USE_PERCENT" "$update_clinvar" "$MAX_ANNOVAR_JOBS" "${work_dir}/output/10_Mutect2/success_samples.txt" "$ANNOVAR_PROTOCOL" "$ANNOVAR_OPERATION" "$ANNOVAR_EXTRA_ARGS" \
       "${work_dir}/output/11_annovar_somatic" "$conda_bin" || return 1
     date +"%Y-%m-%d %H:%M:%S" && echo -e "\e[37;42mWGS somatic pipeline: all done\e[m"
