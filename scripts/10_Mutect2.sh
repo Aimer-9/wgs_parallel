@@ -35,6 +35,7 @@ FILTER_MUTECT_EXTRA_ARGS=${13:-}
 mutect2_dir="${work_dir}/output/10_Mutect2"
 bqsr_dir="${work_dir}/output/06_bqsr"
 pair_manifest="${mutect2_dir}/pairs.tsv"
+pending_pair_manifest="${mutect2_dir}/pending_pairs.tsv"
 interval_manifest="${mutect2_dir}/intervals.tsv"
 skipped_pairs="${mutect2_dir}/skipped_pairs.tsv"
 failed_pairs="${mutect2_dir}/failed_pairs.tsv"
@@ -42,6 +43,7 @@ success_samples="${mutect2_dir}/success_samples.txt"
 mkdir -p "$mutect2_dir"
 printf 'sample_id\tnormal_bam\treason\n' > "$skipped_pairs"
 : > "$pair_manifest"
+: > "$pending_pair_manifest"
 : > "$interval_manifest"
 : > "$success_samples"
 
@@ -117,6 +119,15 @@ while IFS= read -r manifest_row; do
     continue
   fi
   printf '%s\t%s\t%s\n' "$sample_id" "$normal_bam" "$normal_sample" >> "$pair_manifest"
+  pass_vcf="${mutect2_dir}/${sample_id}.mutect2.filtered.PASS.vcf"
+  if [ -s "$pass_vcf" ]; then
+    echo "Mutect2: ${sample_id} final PASS VCF exists; skipping calling"
+    while IFS=$'\t' read -r order logical contig length; do
+      rm -f "${mutect2_dir}/${sample_id}.mutect2.${contig}.unfiltered.vcf"*
+    done < "$primary_contigs_tsv"
+    continue
+  fi
+  printf '%s\t%s\t%s\n' "$sample_id" "$normal_bam" "$normal_sample" >> "$pending_pair_manifest"
   while IFS=$'\t' read -r order logical contig length; do
     printf '%s\t%s\t%s\t%s\n' "$sample_id" "$normal_bam" "$normal_sample" "$contig" >> "$interval_manifest"
   done < "$primary_contigs_tsv"
@@ -212,8 +223,12 @@ cleanup_finalize_mutect2_pair() {
 mutect_status=0
 if [ -s "$pair_manifest" ]; then
   echo "Mutect2: start"
-  parallel_run_sample_list "$interval_manifest" "$MAX_MUTECT2_JOBS" run_mutect2_interval mutect2_interval never || mutect_status=$?
-  parallel_run_sample_list "$pair_manifest" "$MAX_MUTECT2_JOBS" finalize_mutect2_pair mutect2_finalize never || mutect_status=$?
+  if [ -s "$interval_manifest" ]; then
+    parallel_run_sample_list "$interval_manifest" "$MAX_MUTECT2_JOBS" run_mutect2_interval mutect2_interval never || mutect_status=$?
+  fi
+  if [ -s "$pending_pair_manifest" ]; then
+    parallel_run_sample_list "$pending_pair_manifest" "$MAX_MUTECT2_JOBS" finalize_mutect2_pair mutect2_finalize never || mutect_status=$?
+  fi
 else
   echo "Mutect2: no valid tumor-normal pairs"
 fi

@@ -141,30 +141,49 @@ fi
 clinvar_version=$(basename -s .txt "$latest_clinvar_file" | sed "s/hg${hsa_version}_//")
 date +"%Y-%m-%d %H:%M:%S" && echo "Using ClinVar version: ${clinvar_version}"
 
-# Convert each available PASS-filtered VCF to ANNOVAR's avinput representation.
+# Convert each input VCF to ANNOVAR's avinput representation. Mutect2 inputs use
+# multi-sample conversion so all tumor-normal loci remain in one avinput file.
 convert_to_avinput() {
   local sample_id=$1
   local vcf="${vcf_prefix}/${sample_id}${vcf_suffix}"
   local avinput="${annovar_dir}/${sample_id}.avinput"
+  local multisample_marker="${avinput}.multisample"
+  local -a conversion_args=()
+
+  if [[ "$vcf_suffix" == *mutect2*.vcf* ]]; then
+    conversion_args+=("-allsample" "-withfreq")
+  fi
 
   if [ ! -s "$vcf" ]; then
     echo "Warning: VCF not found for ${sample_id} — skipping (${vcf})"; return 0
   fi
   if [ -s "$avinput" ]; then
-    echo -e "\e[37;42mannovar convert: ${sample_id} exists\e[m"; return 0
+    if [[ "$vcf_suffix" != *mutect2*.vcf* ]] || [ -e "$multisample_marker" ]; then
+      echo -e "\e[37;42mannovar convert: ${sample_id} exists\e[m"; return 0
+    fi
+    echo "Legacy somatic avinput detected for ${sample_id}; rebuilding"
+    rm -f "$avinput" "$multisample_marker" \
+      "${annovar_dir}/${sample_id}.hg${hsa_version}_"* \
+      "${annovar_dir}/${sample_id}.log" \
+      "${annovar_dir}/${sample_id}.invalid_input"
   fi
 
   date +"%Y-%m-%d %H:%M:%S" && echo -e "\e[37;42mannovar convert: ${sample_id} processing\e[m"
   perl "${annovar_path}/convert2annovar.pl" \
     -format vcf4 \
     -includeinfo \
+    "${conversion_args[@]}" \
     "$vcf" \
-    -out "$avinput"
+    -out "$avinput" || return 1
+  [ -s "$avinput" ] || return 1
+  if [[ "$vcf_suffix" == *mutect2*.vcf* ]]; then
+    : > "$multisample_marker"
+  fi
   date +"%Y-%m-%d %H:%M:%S" && echo -e "\e[37;42mannovar convert: ${sample_id} done\e[m"
 }
 
 cleanup_convert_to_avinput() {
-  rm -f "${annovar_dir}/$1.avinput"
+  rm -f "${annovar_dir}/$1.avinput" "${annovar_dir}/$1.avinput.multisample"
 }
 
 date +"%Y-%m-%d %H:%M:%S" && echo -e "\e[37;42mannovar convert: start\e[m"
@@ -182,14 +201,25 @@ fi
 run_annotation() {
   local sample_id=$1
   local avinput="${annovar_dir}/${sample_id}.avinput"
+  local vcf="${vcf_prefix}/${sample_id}${vcf_suffix}"
   local avoutput_prefix="${annovar_dir}/${sample_id}"
+  local multianno="${avoutput_prefix}.hg${hsa_version}_multianno.txt"
   local -a extra_args=()
   read_extra_args "$ANNOVAR_EXTRA_ARGS" extra_args || return 1
+
+  if [ -e "${avoutput_prefix}.vcfinput" ]; then
+    echo "Direct-VCF somatic annotation detected for ${sample_id}; rebuilding from avinput"
+    rm -f "${avoutput_prefix}.hg${hsa_version}_"* \
+      "${avoutput_prefix}.log" "${avoutput_prefix}.invalid_input" \
+      "${avoutput_prefix}.vcfinput"
+  fi
 
   if [ ! -s "$avinput" ]; then
     echo "Warning: avinput not found for ${sample_id} — skipping"; return 0
   fi
-  if [ -s "${avoutput_prefix}.hg${hsa_version}_multianno.txt" ]; then
+  if [ -s "$multianno" ]; then
+    python3 "${REPO_DIR}/scripts/rename_annovar_otherinfo.py" \
+      --multianno "$multianno" --vcf "$vcf" --avinput "$avinput" || return 1
     echo -e "\e[37;42mannovar annotate: ${sample_id} exists\e[m"; return 0
   fi
 
@@ -206,7 +236,10 @@ run_annotation() {
     -operation      "$OPERATION_TYPE" \
     -nastring NA \
     "${extra_args[@]}" \
-    -remove
+    -remove || return 1
+  [ -s "$multianno" ] || return 1
+  python3 "${REPO_DIR}/scripts/rename_annovar_otherinfo.py" \
+    --multianno "$multianno" --vcf "$vcf" --avinput "$avinput" || return 1
   date +"%Y-%m-%d %H:%M:%S" && echo -e "\e[37;42mannovar annotate: ${sample_id} done\e[m"
 }
 

@@ -5,6 +5,9 @@ Mutect2 calling, and ANNOVAR annotation.
 
 ## Quick Start
 
+See [install.md](install.md) for system requirements, `setup.sh` modes,
+reference installation, and the manual ANNOVAR academic download.
+
 ```bash
 # Install/detect tools and references and write ./config.yaml.
 bash setup.sh
@@ -82,7 +85,17 @@ Mutect2 likewise scatters each tumor-normal pair across the 25 primary contigs,
 then gathers the unfiltered shards before `FilterMutectCalls`. ANNOVAR annotates
 only the final gathered and filtered VCF, not chromosome shards or PASS extracts.
 Per-contig VCF, index, and statistics files are removed after the VCF and
-Mutect2 statistics have both been merged successfully.
+Mutect2 statistics have both been merged successfully. Somatic VCF conversion
+uses `-allsample -withfreq` so all tumor-normal loci remain in one annotation
+input. After annotation, generic `Otherinfo*` headings in `multianno.txt` are
+replaced with the generated ANNOVAR field names and original VCF headings,
+including tumor and normal sample names. A non-empty final
+`*.mutect2.filtered.PASS.vcf` is the pair completion checkpoint; subsequent
+runs skip all Mutect2 and gather/filter work for it.
+
+Germline `multianno.txt` files receive the same header cleanup. Their
+`Otherinfo*` columns are replaced directly with the source VCF headings and
+sample name.
 
 ## Commands And Layout
 
@@ -113,7 +126,7 @@ output/06_bqsr/
 output/07_HaplotypeCaller/
 output/08_VQSR/
 output/09_annovar/
-output/10_Mutect2/{pairs,skipped_pairs,failed_pairs}.tsv
+output/10_Mutect2/{pairs,pending_pairs,skipped_pairs,failed_pairs}.tsv
 output/10_Mutect2/success_samples.txt
 output/11_annovar_somatic/
 ```
@@ -144,7 +157,7 @@ parameters:
 
 When `parameters.annovar.update_clinvar` is `yes`, Stage 09 runs the integrated
 `scripts/update_resources.py` and `scripts/avinput2annovardb.py` in the
-`update_annovar_db` Conda environment. Downloaded VCF/avinput files are cached
+`wgs_parallel` Conda environment. Downloaded VCF/avinput files are cached
 under `scripts/clinvar/<build>/`; the converted database and its ANNOVAR index
 are installed directly under `<annovar_dir>/humandb/` with an `hg19_` or `hg38_`
 prefix.
